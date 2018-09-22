@@ -8,7 +8,7 @@ extern crate lazy_static;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use socket2::{Socket, Domain, Type, Protocol};
-use futures::{Future, Stream};
+use futures::Stream;
 use tokio_core::net::{UdpCodec, UdpSocket};
 use tokio_core::reactor::Core;
 
@@ -37,29 +37,15 @@ impl UdpCodec for LineCodec {
     }
 }
 
-fn compute(handle: &Handle, addr: SocketAddr, _msg: Vec<u8>) -> Box<Future<Item = (), Error = ()>> {
-    println!("Starting to compute for: {}", addr);
-    Box::new(
-        Timeout::new(std::time::Duration::from_secs(8), handle)
-            .unwrap()
-            .map_err(|e| panic!("timeout failed: {:?}", e))
-            .and_then(move |()| {
-                println!("Done computing for for: {}", addr);
-                Ok(())
-            }),
-    )
-}
-
 fn main() {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
-    let socket = join_multicast(&MDNS_IPV4).expect("mDNS IPv4 join_multicast");
+    let socket = join_multicast(&MDNS_IPV4).expect("mDNS IPv4 join_multicast").unwrap();
 
     let (writer, reader) = socket.framed(LineCodec).split();
 
     let socket_read = reader.for_each(|(addr, msg)| {
         println!("Got {:?}", msg);
-        handle.spawn(compute(addr, msg));
         Ok(())
     });
 
@@ -75,7 +61,7 @@ fn bind_multicast(socket: &Socket, addr: &SocketAddr) -> io::Result<()> {
 /// Returns a socket joined to the multicast address
 fn join_multicast(
     multicast_addr: &SocketAddr,
-) -> Result<Option<std::net::UdpSocket>, io::Error> {
+) -> Result<Option<UdpSocket>, io::Error> {
 
     let ip_addr = multicast_addr.ip();
     // it's an error to not use a proper mDNS address
@@ -118,6 +104,6 @@ fn join_multicast(
     socket.set_reuse_port(true).expect("reuse port Error");
     bind_multicast(&socket, &multicast_addr).expect("bind Error");
 
-    Ok(Some(socket.into_udp_socket()))
+    Ok(Some(socket.into())
 }
 
