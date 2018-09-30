@@ -1,17 +1,19 @@
 extern crate socket2;
 extern crate futures;
-extern crate tokio_core;
+extern crate tokio;
+extern crate tokio_codec;
 extern crate tokio_io;
 #[macro_use]
 extern crate lazy_static;
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use socket2::{Socket, Domain, Type, Protocol};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use futures::Stream;
-use tokio_core::net::{UdpCodec, UdpSocket};
-use tokio_core::reactor::Core;
+use tokio::prelude::*;
+use tokio::net::{UdpSocket, UdpFramed};
+use tokio_codec::BytesCodec;
 
+const IP_ALL: [u8; 4] = [0, 0, 0, 0];
 pub const MDNS_PORT: u16 = 5353;
 lazy_static! {
     /// mDNS ipv4 address https://www.iana.org/assignments/multicast-addresses/multicast-addresses.xhtml
@@ -20,48 +22,36 @@ lazy_static! {
     pub static ref MDNS_IPV6: SocketAddr = SocketAddr::new(Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 0x00FB).into(), MDNS_PORT);
 }
 
-
-// just a codec to send and receive bytes
-pub struct LineCodec;
-impl UdpCodec for LineCodec {
-    type In = (SocketAddr, Vec<u8>);
-    type Out = (SocketAddr, Vec<u8>);
-
-    fn decode(&mut self, addr: &SocketAddr, buf: &[u8]) -> std::io::Result<Self::In> {
-        Ok((*addr, buf.to_vec()))
-    }
-
-    fn encode(&mut self, (addr, buf): Self::Out, into: &mut Vec<u8>) -> SocketAddr {
-        into.extend(buf);
-        addr
-    }
-}
-
 fn main() {
-    let mut core = Core::new().unwrap();
-    let handle = core.handle();
-    let socket = join_multicast(&MDNS_IPV4).expect("mDNS IPv4 join_multicast").unwrap();
+    let std_socket = join_multicast(&MDNS_IPV4).expect("mDNS IPv4 join_multicast");
+    let socket = UdpSocket::from_std(std_socket,
+        &tokio::reactor::Handle::current()).unwrap();
 
-    let (writer, reader) = socket.framed(LineCodec).split();
+    let (_writer, reader) = UdpFramed::new(socket, BytesCodec::new()).split();
 
-    let socket_read = reader.for_each(|(addr, msg)| {
-        println!("Got {:?}", msg);
+    let socket_read = reader.for_each(|_msg| {
+        println!("Got msg");
         Ok(())
     });
 
-    core.run(socket_read).unwrap();
+    //let reader = reader.map(|msg| {
+    //    println!("[b] recv msg");
+    //});
+
+    // Spawn the sender of pongs and then wait for our pinger to finish.
+    tokio::run({
+        socket_read.map(|_| ())
+                   .map_err(|e| println!("error = {:?}", e))
+    });
 }
 
-
-#[cfg(unix)]
-fn bind_multicast(socket: &Socket, addr: &SocketAddr) -> io::Result<()> {
-    socket.bind(&socket2::SockAddr::from(*addr))
-}
 
 /// Returns a socket joined to the multicast address
 fn join_multicast(
     multicast_addr: &SocketAddr,
-) -> Result<Option<UdpSocket>, io::Error> {
+) -> Result<std::net::UdpSocket, std::io::Error> {
+
+    use socket2::{Domain, Type, Protocol, Socket};
 
     let ip_addr = multicast_addr.ip();
     // it's an error to not use a proper mDNS address
@@ -98,12 +88,14 @@ fn join_multicast(
         }
     };
 
+    let addr = SocketAddrV4::new(IP_ALL.into(), MDNS_PORT);
     socket.set_nonblocking(true).expect("nonblocking Error");
     socket.set_reuse_address(true).expect("reuse addr Error");
     #[cfg(unix)] // this is currently restricted to Unix's in socket2
     socket.set_reuse_port(true).expect("reuse port Error");
-    bind_multicast(&socket, &multicast_addr).expect("bind Error");
+    socket.set_multicast_loop_v4(true)?;
+    socket.bind(&socket2::SockAddr::from(addr))?;
 
-    Ok(Some(socket.into())
+    Ok(socket.into_udp_socket())
 }
 
