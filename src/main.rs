@@ -3,15 +3,19 @@ extern crate futures;
 extern crate tokio;
 extern crate tokio_codec;
 extern crate tokio_io;
+extern crate dns_parser;
 #[macro_use]
 extern crate lazy_static;
 
 use std::io;
+use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use futures::Stream;
 use tokio::prelude::*;
 use tokio::net::{UdpSocket, UdpFramed};
 use tokio_codec::BytesCodec;
+
+use dns_parser::{Packet, ResponseCode};
 
 const IP_ALL: [u8; 4] = [0, 0, 0, 0];
 pub const MDNS_PORT: u16 = 5353;
@@ -22,6 +26,17 @@ lazy_static! {
     pub static ref MDNS_IPV6: SocketAddr = SocketAddr::new(Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 0x00FB).into(), MDNS_PORT);
 }
 
+fn extract_packet(buf: &[u8]) -> Result<(), Box<Error>> {
+    let pkt = Packet::parse(buf)?;
+    if pkt.header.response_code != ResponseCode::NoError {
+        return Err(pkt.header.response_code.into());
+    }
+    if pkt.answers.len() == 0 {
+        return Err("No records received".into());
+    }
+    Ok(())
+}
+
 fn main() {
     let std_socket = join_multicast(&MDNS_IPV4).expect("mDNS IPv4 join_multicast");
     let socket = UdpSocket::from_std(std_socket,
@@ -29,8 +44,15 @@ fn main() {
 
     let (_writer, reader) = UdpFramed::new(socket, BytesCodec::new()).split();
 
-    let socket_read = reader.for_each(|msg| {
-        println!("msg -> {:?}", msg);
+    let socket_read = reader.for_each(|(msg, addr)| {
+        match extract_packet(&msg) {
+            Ok(()) => {
+                println!("Valid packet from {}", addr);
+            },
+            Err(e) => {
+                eprintln!("Error from {}: {}", addr, e);
+            }
+        }
         Ok(())
     });
 
