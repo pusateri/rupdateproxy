@@ -29,16 +29,11 @@ fn main() {
 
     let (_writer, reader) = UdpFramed::new(socket, BytesCodec::new()).split();
 
-    let socket_read = reader.for_each(|_msg| {
-        println!("Got msg");
+    let socket_read = reader.for_each(|msg| {
+        println!("msg -> {:?}", msg);
         Ok(())
     });
 
-    //let reader = reader.map(|msg| {
-    //    println!("[b] recv msg");
-    //});
-
-    // Spawn the sender of pongs and then wait for our pinger to finish.
     tokio::run({
         socket_read.map(|_| ())
                    .map_err(|e| println!("error = {:?}", e))
