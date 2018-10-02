@@ -4,18 +4,23 @@ extern crate tokio;
 extern crate tokio_codec;
 extern crate tokio_io;
 extern crate dns_parser;
+extern crate ttl_cache;
 #[macro_use]
 extern crate lazy_static;
 
 use std::io;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
+use ttl_cache::TtlCache;
 use futures::Stream;
 use tokio::prelude::*;
 use tokio::net::{UdpSocket, UdpFramed};
 use tokio_codec::BytesCodec;
+use dns_parser::{Packet, ResponseCode, RData};
+use dns_parser::rdata::a::Record;
 
-use dns_parser::{Packet, ResponseCode};
+mod rrtypes;
+use rrtypes::rrtype_code;
 
 const IP_ALL: [u8; 4] = [0, 0, 0, 0];
 pub const MDNS_PORT: u16 = 5353;
@@ -26,13 +31,54 @@ lazy_static! {
     pub static ref MDNS_IPV6: SocketAddr = SocketAddr::new(Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 0x00FB).into(), MDNS_PORT);
 }
 
+#[derive(PartialEq, Eq, Hash)]
+struct RecordKey <'a> {
+    name: &'a str,
+    rrtype: rrtype_code,
+    data: &'a [u8],
+}
+
+struct RecordInfo <'a> {
+    name: &'a str,
+    rrtype: rrtype_code,
+    ttl: u32,
+    data: &'a [u8],
+}
+
+
+// extract the buffer into a Packet struct and filter duplicates
 fn extract_packet(buf: &[u8]) -> Result<(), Box<Error>> {
     let pkt = Packet::parse(buf)?;
     if pkt.header.response_code != ResponseCode::NoError {
         return Err(pkt.header.response_code.into());
     }
-    if pkt.answers.len() == 0 {
-        return Err("No records received".into());
+
+    if pkt.header.query == true {
+        return Ok(());
+    }
+    // cache responses
+    for response in pkt.answers {
+        
+        let mut record = RecordKey{
+            name: &Box::new(response.name.to_string()),
+            rrtype: rrtype_code::RR_TYPE_NONE,
+            data: &[0],
+        };
+        record.rrtype = match response.data {
+            RData::A(_addr)     => rrtype_code::RR_TYPE_A,
+            RData::AAAA(_addr)  => rrtype_code::RR_TYPE_AAAA,
+            RData::CNAME(_name) => rrtype_code::RR_TYPE_CNAME,
+            RData::MX(_mx)      => rrtype_code::RR_TYPE_MX,
+            RData::NS(_ns)      => rrtype_code::RR_TYPE_NS,
+            RData::PTR(_ptr)    => rrtype_code::RR_TYPE_PTR,
+            RData::SOA(_soa)    => rrtype_code::RR_TYPE_SOA,
+            RData::SRV(_srv)    => rrtype_code::RR_TYPE_SRV,
+            RData::TXT(_txt)    => rrtype_code::RR_TYPE_TXT,
+            RData::Unknown(_)   => rrtype_code::RR_TYPE_NONE,
+        };
+        record.data = match response.data {
+            RData::A(Record(ip))     => ip,
+        }
     }
     Ok(())
 }
@@ -44,11 +90,10 @@ fn main() {
 
     let (_writer, reader) = UdpFramed::new(socket, BytesCodec::new()).split();
 
+    let mut cache: TtlCache<RecordKey, RecordInfo> = TtlCache::new(10);
     let socket_read = reader.for_each(|(msg, addr)| {
         match extract_packet(&msg) {
-            Ok(()) => {
-                println!("Valid packet from {}", addr);
-            },
+            Ok(()) => {},
             Err(e) => {
                 eprintln!("Error from {}: {}", addr, e);
             }
