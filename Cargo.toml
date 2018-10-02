@@ -11,5 +11,5 @@ tokio-io = "0.1"
 futures = "0.1"
 lazy_static = "^1.0"
 socket2 = { version = "0.3.7", features = ["reuseport"] }
-dns-parser = "0.8.0"
+domain = "0.2"
 ttl_cache = "0.4.2"
