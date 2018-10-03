@@ -44,11 +44,11 @@ struct RecordInfo <'a> {
 
 
 // extract the buffer into a Packet struct and filter duplicates
-fn extract_packet(buf: &[u8]) -> Result<(), Box<Error>> {
+fn extract_packet(_cache: &TtlCache<RecordKey, RecordInfo>, buf: &[u8]) -> Result<(), Box<Error>> {
     let msg = Message::from_bytes(buf).unwrap();
 
     if msg.is_error() {
-        return Err(msg.header().rcode());
+        return Ok(());
     }
 
     if msg.header().qr() == false {
@@ -56,7 +56,7 @@ fn extract_packet(buf: &[u8]) -> Result<(), Box<Error>> {
     }
     // cache responses
     for record in msg.answer().unwrap() {
-        if let Ok(record) = record {
+        if let Ok(_record) = record {
         }
     }
     Ok(())
@@ -64,14 +64,12 @@ fn extract_packet(buf: &[u8]) -> Result<(), Box<Error>> {
 
 fn main() {
     let std_socket = join_multicast(&MDNS_IPV4).expect("mDNS IPv4 join_multicast");
-    let socket = UdpSocket::from_std(std_socket,
-        &tokio::reactor::Handle::current()).unwrap();
-
+    let socket = UdpSocket::from_std(std_socket, &tokio::reactor::Handle::current()).unwrap();
     let (_writer, reader) = UdpFramed::new(socket, BytesCodec::new()).split();
+    let cache: TtlCache<RecordKey, RecordInfo> = TtlCache::new(10);
 
-    let mut cache: TtlCache<RecordKey, RecordInfo> = TtlCache::new(10);
-    let socket_read = reader.for_each(|(msg, addr)| {
-        match extract_packet(&msg) {
+    let socket_read = reader.for_each(move |(msg, addr)| {
+        match extract_packet(&cache, &msg) {
             Ok(()) => {},
             Err(e) => {
                 eprintln!("Error from {}: {}", addr, e);
