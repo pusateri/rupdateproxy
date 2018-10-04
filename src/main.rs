@@ -3,7 +3,8 @@ extern crate futures;
 extern crate tokio;
 extern crate tokio_codec;
 extern crate tokio_io;
-extern crate domain;
+extern crate bytes;
+extern crate domain_core;
 #[macro_use]
 extern crate lazy_static;
 
@@ -16,7 +17,11 @@ use futures::Stream;
 use tokio::prelude::*;
 use tokio::net::{UdpSocket, UdpFramed};
 use tokio_codec::BytesCodec;
-use domain::bits::message::Message;
+use bytes::Bytes;
+use domain_core::iana::Rtype;
+use domain_core::bits::Dname;
+use domain_core::bits::message::Message;
+use domain_core::rdata::AllRecordData;
 
 
 const IP_ALL: [u8; 4] = [0, 0, 0, 0];
@@ -28,24 +33,22 @@ lazy_static! {
     pub static ref MDNS_IPV6: SocketAddr = SocketAddr::new(Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 0x00FB).into(), MDNS_PORT);
 }
 
-#[derive(PartialEq, Eq, Hash)]
-struct RecordKey <'a> {
-    name: &'a str,
-    rrtype: u16,
-    data: &'a [u8],
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RecordKey {
+   name: Dname,
+   data: AllRecordData<Rtype>,
 }
 
-struct RecordInfo <'a> {
-    name: &'a str,
-    rrtype: u16,
+struct RecordInfo {
+    name: Dname,
+    data: AllRecordData<Rtype>,
     ttl: u32,
-    data: &'a [u8],
 }
 
 
 // extract the buffer into a Packet struct and filter duplicates
 fn extract_packet(cache: &mut HashMap<RecordKey, RecordInfo>, buf: &[u8]) -> Result<(), Box<Error>> {
-    let msg = Message::from_bytes(buf).unwrap();
+    let msg = Message::from_bytes(Bytes::from(buf)).unwrap();
 
     if msg.is_error() {
         return Ok(());
@@ -58,16 +61,14 @@ fn extract_packet(cache: &mut HashMap<RecordKey, RecordInfo>, buf: &[u8]) -> Res
     for record in msg.answer().unwrap() {
         if let Ok(record) = record {
             let key = RecordKey {
-                name: &record.name().to_string(),
-                rrtype: record.rtype().to_int(),
-                data: &[0],
+                name: record.owner(),
+                data: record.data(),
             };
             let ttl = record.ttl();
             let val = RecordInfo {
-                name: &record.name().to_string(),
-                rrtype: record.rtype().to_int(),
+                name: record.owner().into().clone(),
                 ttl: ttl,
-                data: &[0],
+                data: record.data(),
             };
             let duration = Duration::from_secs(ttl.into());
             match cache.get(&key) {
