@@ -20,6 +20,7 @@ use tokio_codec::BytesCodec;
 use bytes::Bytes;
 use domain_core::iana::Rtype;
 use domain_core::bits::Dname;
+use domain_core::bits::name::{ParsedDname, ToDname};
 use domain_core::bits::message::Message;
 use domain_core::rdata::AllRecordData;
 
@@ -36,12 +37,12 @@ lazy_static! {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RecordKey {
    name: Dname,
-   data: AllRecordData<Rtype>,
+   data: AllRecordData<ParsedDname>,
 }
 
 struct RecordInfo {
     name: Dname,
-    data: AllRecordData<Rtype>,
+    data: AllRecordData<ParsedDname>,
     ttl: u32,
 }
 
@@ -58,19 +59,20 @@ fn extract_packet(cache: &mut HashMap<RecordKey, RecordInfo>, buf: &[u8]) -> Res
         return Ok(());
     }
     // cache responses
-    for record in msg.answer().unwrap() {
+    for record in msg.answer().unwrap().limit_to::<AllRecordData<ParsedDname>>() {
         if let Ok(record) = record {
             let key = RecordKey {
-                name: record.owner(),
-                data: record.data(),
+                name: record.owner().to_name(),
+                data: record.data().clone(),
             };
             let ttl = record.ttl();
             let val = RecordInfo {
-                name: record.owner().into().clone(),
+                name: record.owner().to_name(),
                 ttl: ttl,
-                data: record.data(),
+                data: record.data().clone(),
             };
             let duration = Duration::from_secs(ttl.into());
+            /*
             match cache.get(&key) {
                 Some(k) => {
                     if k.ttl < ttl {
@@ -81,6 +83,7 @@ fn extract_packet(cache: &mut HashMap<RecordKey, RecordInfo>, buf: &[u8]) -> Res
                     cache.insert(key, val);
                 }                
             }
+            */
         }
     }
     Ok(())
