@@ -3,6 +3,7 @@ extern crate futures;
 extern crate tokio;
 extern crate tokio_codec;
 extern crate tokio_io;
+extern crate tokio_timer;
 extern crate bytes;
 extern crate domain_core;
 #[macro_use]
@@ -11,14 +12,14 @@ extern crate lazy_static;
 use std::io;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use futures::Stream;
 use tokio::prelude::*;
 use tokio::net::{UdpSocket, UdpFramed};
 use tokio_codec::BytesCodec;
+use tokio::timer::Delay;
 use bytes::Bytes;
-use domain_core::iana::Rtype;
 use domain_core::bits::Dname;
 use domain_core::bits::name::{ParsedDname, ToDname};
 use domain_core::bits::message::Message;
@@ -40,15 +41,18 @@ struct RecordKey {
    data: AllRecordData<ParsedDname>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RecordInfo {
-    name: Dname,
-    data: AllRecordData<ParsedDname>,
     ttl: u32,
 }
 
+struct IfState {
+    if_index: u32,
+    cache: HashMap<RecordKey, RecordInfo>,
+}
 
 // extract the buffer into a Packet struct and filter duplicates
-fn extract_packet(cache: &mut HashMap<RecordKey, RecordInfo>, buf: &[u8]) -> Result<(), Box<Error>> {
+fn extract_packet(intf: &mut IfState, buf: &[u8]) -> Result<(), Box<Error>> {
     let msg = Message::from_bytes(Bytes::from(buf)).unwrap();
 
     if msg.is_error() {
@@ -66,24 +70,23 @@ fn extract_packet(cache: &mut HashMap<RecordKey, RecordInfo>, buf: &[u8]) -> Res
                 data: record.data().clone(),
             };
             let ttl = record.ttl();
-            let val = RecordInfo {
-                name: record.owner().to_name(),
-                ttl: ttl,
-                data: record.data().clone(),
-            };
             let duration = Duration::from_secs(ttl.into());
-            /*
-            match cache.get(&key) {
-                Some(k) => {
-                    if k.ttl < ttl {
 
-                    }
-                },
-                None => {
-                    cache.insert(key, val);
-                }                
-            }
-            */
+            let when = Instant::now() + duration;
+            let val = RecordInfo {
+                ttl: ttl,
+            };
+
+            let v = intf.cache.entry(key.clone()).or_insert(val);
+            v.ttl = ttl;
+
+            let task = Delay::new(when)
+                .and_then(move |_| {
+                    println!("timeout for {}", key.name);
+                    Ok(())
+                })
+                .map_err(|e| panic!("delay errored; err={:?}", e));
+            tokio::spawn(task);
         }
     }
     Ok(())
@@ -93,10 +96,13 @@ fn main() {
     let std_socket = join_multicast(&MDNS_IPV4).expect("mDNS IPv4 join_multicast");
     let socket = UdpSocket::from_std(std_socket, &tokio::reactor::Handle::current()).unwrap();
     let (_writer, reader) = UdpFramed::new(socket, BytesCodec::new()).split();
-    let mut cache: HashMap<RecordKey, RecordInfo> = HashMap::new();
+    let mut intf = IfState {
+        if_index: 0,
+        cache: HashMap::new(),
+    };
 
     let socket_read = reader.for_each(move |(msg, addr)| {
-        match extract_packet(&mut cache, &msg) {
+        match extract_packet(&mut intf, &msg) {
             Ok(()) => {},
             Err(e) => {
                 eprintln!("Error from {}: {}", addr, e);
