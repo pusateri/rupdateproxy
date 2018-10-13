@@ -14,3 +14,6 @@ lazy_static = "^1.0"
 socket2 = { version = "0.3.7", features = ["reuseport"] }
 bytes = "*"
 domain-core = "*"
+nix = "*"
+treebitmap = "*"
+ipnetwork = "*"

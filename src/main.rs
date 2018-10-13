@@ -6,12 +6,14 @@ extern crate tokio_io;
 extern crate tokio_timer;
 extern crate bytes;
 extern crate domain_core;
+extern crate nix;
+extern crate treebitmap;
+extern crate ipnetwork;
 #[macro_use]
 extern crate lazy_static;
 
-use std::io;
 use std::error::Error;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, Ipv6Addr, IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use futures::Stream;
@@ -19,12 +21,18 @@ use tokio::prelude::*;
 use tokio::net::{UdpSocket, UdpFramed};
 use tokio_codec::BytesCodec;
 use tokio::timer::Delay;
+use nix::ifaddrs;
+use nix::net::if_;
+use nix::sys::socket;
 use bytes::Bytes;
 use domain_core::bits::Dname;
 use domain_core::bits::name::{ParsedDname, ToDname};
 use domain_core::bits::message::Message;
 use domain_core::rdata::AllRecordData;
+use treebitmap::*;
+use ipnetwork::ip_mask_to_prefix;
 
+mod multicast;
 
 const IP_ALL: [u8; 4] = [0, 0, 0, 0];
 pub const MDNS_PORT: u16 = 5353;
@@ -92,22 +100,90 @@ fn extract_packet(intf: &mut IfState, buf: &[u8]) -> Result<(), Box<Error>> {
     Ok(())
 }
 
+fn sockaddr2Ipaddr(sockaddr: Option<socket::SockAddr>) -> Option<IpAddr>
+{
+    match sockaddr {
+        Some(address) => {
+            match address {
+                socket::SockAddr::Inet(socket::InetAddr::V4(addr)) => Some(IpAddr::from(Ipv4Addr::from(addr.sin_addr.s_addr))),
+                socket::SockAddr::Inet(socket::InetAddr::V6(addr)) => Some(IpAddr::from(Ipv6Addr::from(addr.sin6_addr.s6_addr))),
+                _ => None,
+            }
+        },
+        None => None,
+    }
+    /*
+        match addr {
+            socket::InetAddr::V4(ip4) => v4_ifs.insert(ip4, ifaddr.netmask, intf),
+            socket::InetAddr::V6(ip6) => v6_ifs.insert(ip6, ifaddr.netmask, intf),
+        }
+    */
+}
+
+fn ifaddr2prefix(ifaddr: ifaddrs::InterfaceAddress) -> (IpAddr, u8) {
+    let ip = sockaddr2Ipaddr(ifaddr.address).expect("invalid interface address");
+    let mask = sockaddr2Ipaddr(ifaddr.netmask).expect("invalid netmask");
+    let plen = ipnetwork::ip_mask_to_prefix(mask).expect("invalid network mask");
+    (ip, plen)
+}
+
+fn init_interfaces(v4_ifs: &mut IpLookupTable<Ipv4Addr, IfState>,
+                   v6_ifs: &mut IpLookupTable<Ipv6Addr, IfState>) {
+    let addrs = ifaddrs::getifaddrs().unwrap();
+    for ifaddr in addrs {
+        let (ip, plen) = ifaddr2prefix(ifaddr);
+        let if_index = if_::if_nametoindex(&ifaddr.interface_name[..]).unwrap();
+        let intf = IfState {
+            if_index: if_index,
+            cache: HashMap::new(),
+        };
+        match ip {
+            IpAddr::V4(ip4) => v4_ifs.insert(ip4, plen.into(), intf),
+            IpAddr::V6(ip6) => v6_ifs.insert(ip6, plen.into(), intf),
+        };
+    }
+}
+
+fn intf_for_address<'a>(sockaddr: SocketAddr,
+                    v4_ifs: &'a IpLookupTable<Ipv4Addr, IfState>,
+                    v6_ifs: &'a IpLookupTable<Ipv6Addr, IfState>) -> Option<&'a mut IfState>
+{
+    match sockaddr {
+        SocketAddr::V4(sockaddr_v4) => {
+            match v4_ifs.longest_match(*sockaddr_v4.ip()) {
+                Some((addr, plen, mut intf)) => Some(intf),
+                None => None,
+            }
+        },
+        SocketAddr::V6(sockaddr_v6) => {
+            match v6_ifs.longest_match(*sockaddr_v6.ip()) {
+                Some((addr, plen, mut intf)) => Some(intf),
+                None => None,
+            }
+        },
+    }
+}
+
 fn main() {
-    let std_socket = join_multicast(&MDNS_IPV4).expect("mDNS IPv4 join_multicast");
+    let mut v4_interfaces = IpLookupTable::new();
+    let mut v6_interfaces = IpLookupTable::new();
+    init_interfaces(&mut v4_interfaces, &mut v6_interfaces);
+    let std_socket = multicast::join_multicast(&MDNS_IPV4).expect("mDNS IPv4 join_multicast");
     let socket = UdpSocket::from_std(std_socket, &tokio::reactor::Handle::current()).unwrap();
     let (_writer, reader) = UdpFramed::new(socket, BytesCodec::new()).split();
-    let mut intf = IfState {
-        if_index: 0,
-        cache: HashMap::new(),
-    };
 
     let socket_read = reader.for_each(move |(msg, addr)| {
-        match extract_packet(&mut intf, &msg) {
-            Ok(()) => {},
-            Err(e) => {
-                eprintln!("Error from {}: {}", addr, e);
-            }
-        }
+        let mut intf = match intf_for_address(addr, &v4_interfaces, &v6_interfaces) {
+            Some(intf) => {
+                match extract_packet(&mut intf, &msg) {
+                    Ok(()) => {},
+                    Err(e) => {
+                        eprintln!("Error from {}: {}", addr, e);
+                    }
+                }
+            },
+            None => (),
+        };
         Ok(())
     });
 
@@ -116,58 +192,3 @@ fn main() {
                    .map_err(|e| println!("error = {:?}", e))
     });
 }
-
-
-/// Returns a socket joined to the multicast address
-fn join_multicast(
-    multicast_addr: &SocketAddr,
-) -> Result<std::net::UdpSocket, std::io::Error> {
-
-    use socket2::{Domain, Type, Protocol, Socket};
-
-    let ip_addr = multicast_addr.ip();
-    // it's an error to not use a proper mDNS address
-    if !ip_addr.is_multicast() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("expected multicast address for binding: {}", ip_addr),
-        ));
-    }
-
-    // binding the UdpSocket to the multicast address tells the OS to filter all packets on thsi socket to just this
-    //   multicast address
-    // TODO: allow the binding interface to be specified
-    let socket = match ip_addr {
-        IpAddr::V4(ref mdns_v4) => {
-            let socket = Socket::new(
-                Domain::ipv4(),
-                Type::dgram(),
-                Some(Protocol::udp()),
-            ).expect("ipv4 dgram socket");
-            socket.join_multicast_v4(mdns_v4, &Ipv4Addr::new(0, 0, 0, 0)).expect("join_multicast_v4");
-            socket
-        }
-        IpAddr::V6(ref mdns_v6) => {
-            let socket = Socket::new(
-                Domain::ipv6(),
-                Type::dgram(),
-                Some(Protocol::udp()),
-            ).expect("ipv6 dgram socket");
-
-            socket.set_only_v6(true)?;
-            socket.join_multicast_v6(mdns_v6, 0).expect("join_multicast_v6");
-            socket
-        }
-    };
-
-    let addr = SocketAddrV4::new(IP_ALL.into(), MDNS_PORT);
-    socket.set_nonblocking(true).expect("nonblocking Error");
-    socket.set_reuse_address(true).expect("reuse addr Error");
-    #[cfg(unix)] // this is currently restricted to Unix's in socket2
-    socket.set_reuse_port(true).expect("reuse port Error");
-    socket.set_multicast_loop_v4(true)?;
-    socket.bind(&socket2::SockAddr::from(addr))?;
-
-    Ok(socket.into_udp_socket())
-}
-
