@@ -29,8 +29,6 @@ use domain_core::bits::Dname;
 use domain_core::bits::name::{ParsedDname, ToDname};
 use domain_core::bits::message::Message;
 use domain_core::rdata::AllRecordData;
-use treebitmap::*;
-use ipnetwork::ip_mask_to_prefix;
 
 mod multicast;
 
@@ -112,12 +110,6 @@ fn sockaddr2Ipaddr(sockaddr: Option<socket::SockAddr>) -> Option<IpAddr>
         },
         None => None,
     }
-    /*
-        match addr {
-            socket::InetAddr::V4(ip4) => v4_ifs.insert(ip4, ifaddr.netmask, intf),
-            socket::InetAddr::V6(ip6) => v6_ifs.insert(ip6, ifaddr.netmask, intf),
-        }
-    */
 }
 
 fn ifaddr2prefix(ifaddr: ifaddrs::InterfaceAddress) -> (IpAddr, u8) {
@@ -127,11 +119,11 @@ fn ifaddr2prefix(ifaddr: ifaddrs::InterfaceAddress) -> (IpAddr, u8) {
     (ip, plen)
 }
 
-fn init_interfaces(v4_ifs: &mut IpLookupTable<Ipv4Addr, IfState>,
-                   v6_ifs: &mut IpLookupTable<Ipv6Addr, IfState>) {
+fn init_interfaces(v4_ifs: &mut treebitmap::IpLookupTable<Ipv4Addr, IfState>,
+                   v6_ifs: &mut treebitmap::IpLookupTable<Ipv6Addr, IfState>) {
     let addrs = ifaddrs::getifaddrs().unwrap();
     for ifaddr in addrs {
-        let (ip, plen) = ifaddr2prefix(ifaddr);
+        let (ip, plen) = ifaddr2prefix(ifaddr.clone());
         let if_index = if_::if_nametoindex(&ifaddr.interface_name[..]).unwrap();
         let intf = IfState {
             if_index: if_index,
@@ -145,19 +137,19 @@ fn init_interfaces(v4_ifs: &mut IpLookupTable<Ipv4Addr, IfState>,
 }
 
 fn intf_for_address<'a>(sockaddr: SocketAddr,
-                    v4_ifs: &'a IpLookupTable<Ipv4Addr, IfState>,
-                    v6_ifs: &'a IpLookupTable<Ipv6Addr, IfState>) -> Option<&'a mut IfState>
+                        v4_ifs: &'a treebitmap::IpLookupTable<Ipv4Addr, IfState>,
+                        v6_ifs: &'a treebitmap::IpLookupTable<Ipv6Addr, IfState>) -> Option< &'a mut IfState>
 {
     match sockaddr {
         SocketAddr::V4(sockaddr_v4) => {
             match v4_ifs.longest_match(*sockaddr_v4.ip()) {
-                Some((addr, plen, mut intf)) => Some(intf),
+                Some((_addr, _plen, intf)) => Some(intf),
                 None => None,
             }
         },
         SocketAddr::V6(sockaddr_v6) => {
             match v6_ifs.longest_match(*sockaddr_v6.ip()) {
-                Some((addr, plen, mut intf)) => Some(intf),
+                Some((_addr, _plen, intf)) => Some(intf),
                 None => None,
             }
         },
@@ -165,17 +157,18 @@ fn intf_for_address<'a>(sockaddr: SocketAddr,
 }
 
 fn main() {
-    let mut v4_interfaces = IpLookupTable::new();
-    let mut v6_interfaces = IpLookupTable::new();
+    let mut v4_interfaces = treebitmap::IpLookupTable::new();
+    let mut v6_interfaces = treebitmap::IpLookupTable::new();
     init_interfaces(&mut v4_interfaces, &mut v6_interfaces);
     let std_socket = multicast::join_multicast(&MDNS_IPV4).expect("mDNS IPv4 join_multicast");
     let socket = UdpSocket::from_std(std_socket, &tokio::reactor::Handle::current()).unwrap();
     let (_writer, reader) = UdpFramed::new(socket, BytesCodec::new()).split();
 
     let socket_read = reader.for_each(move |(msg, addr)| {
-        let mut intf = match intf_for_address(addr, &v4_interfaces, &v6_interfaces) {
+        let intf_opt = intf_for_address(addr, &v4_interfaces, &v6_interfaces);
+        match intf_opt {
             Some(intf) => {
-                match extract_packet(&mut intf, &msg) {
+                match extract_packet(intf, &msg) {
                     Ok(()) => {},
                     Err(e) => {
                         eprintln!("Error from {}: {}", addr, e);
