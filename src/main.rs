@@ -112,11 +112,23 @@ fn sockaddr_to_ipaddr(sockaddr: Option<socket::SockAddr>) -> Option<IpAddr>
     }
 }
 
-fn ifaddr_to_prefix(ifaddr: ifaddrs::InterfaceAddress) -> (IpAddr, u8) {
-    let ip = sockaddr_to_ipaddr(ifaddr.address).expect("invalid interface address");
-    let mask = sockaddr_to_ipaddr(ifaddr.netmask).expect("invalid netmask");
-    let plen = ipnetwork::ip_mask_to_prefix(mask).expect("invalid network mask");
-    (ip, plen)
+fn ifaddr_to_prefix(ifaddr: ifaddrs::InterfaceAddress) -> Option <ipnetwork::IpNetwork> {
+    let ip = match sockaddr_to_ipaddr(ifaddr.address) {
+        Some(ipaddr) => ipaddr,
+        None => return None,
+    };
+    let mask = match sockaddr_to_ipaddr(ifaddr.netmask) {
+        Some(netmask) => netmask,
+        None => return None,
+    };
+    let plen = match ipnetwork::ip_mask_to_prefix(mask) {
+        Ok(len) => len,
+        Err(_e) => return None,
+    };
+    match ipnetwork::IpNetwork::new(ip, plen) {
+        Ok(ipnet) => return Some(ipnet),
+        Err(_e) => return None
+    };
 }
 
 
@@ -141,7 +153,10 @@ fn main() {
 
     let addrs = ifaddrs::getifaddrs().unwrap();
     for ifaddr in addrs {
-        let (ip, plen) = ifaddr_to_prefix(ifaddr.clone());
+        let (ip, plen) = match ifaddr_to_prefix(ifaddr.clone()) {
+            Some(ipnet) => (ipnet.ip(), ipnet.prefix()),
+            None => continue,
+        };
         let if_index = if_::if_nametoindex(&ifaddr.interface_name[..]).unwrap();
         let intf = IfState {
             if_index: if_index,
