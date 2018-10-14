@@ -15,5 +15,5 @@ socket2 = { version = "0.3.7", features = ["reuseport"] }
 bytes = "*"
 domain-core = "*"
 nix = "*"
-treebitmap = "*"
+treebitmap = { path = "../../src/treebitmap" }
 ipnetwork = "*"

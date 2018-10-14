@@ -98,7 +98,7 @@ fn extract_packet(intf: &mut IfState, buf: &[u8]) -> Result<(), Box<Error>> {
     Ok(())
 }
 
-fn sockaddr2Ipaddr(sockaddr: Option<socket::SockAddr>) -> Option<IpAddr>
+fn sockaddr_to_ipaddr(sockaddr: Option<socket::SockAddr>) -> Option<IpAddr>
 {
     match sockaddr {
         Some(address) => {
@@ -112,18 +112,36 @@ fn sockaddr2Ipaddr(sockaddr: Option<socket::SockAddr>) -> Option<IpAddr>
     }
 }
 
-fn ifaddr2prefix(ifaddr: ifaddrs::InterfaceAddress) -> (IpAddr, u8) {
-    let ip = sockaddr2Ipaddr(ifaddr.address).expect("invalid interface address");
-    let mask = sockaddr2Ipaddr(ifaddr.netmask).expect("invalid netmask");
+fn ifaddr_to_prefix(ifaddr: ifaddrs::InterfaceAddress) -> (IpAddr, u8) {
+    let ip = sockaddr_to_ipaddr(ifaddr.address).expect("invalid interface address");
+    let mask = sockaddr_to_ipaddr(ifaddr.netmask).expect("invalid netmask");
     let plen = ipnetwork::ip_mask_to_prefix(mask).expect("invalid network mask");
     (ip, plen)
 }
 
-fn init_interfaces(v4_ifs: &mut treebitmap::IpLookupTable<Ipv4Addr, IfState>,
-                   v6_ifs: &mut treebitmap::IpLookupTable<Ipv6Addr, IfState>) {
+
+fn intf_for_v4_address(sockaddr: SocketAddr,
+                           ifs: &mut treebitmap::IpLookupTable<Ipv4Addr, IfState>) -> Option<&mut IfState>
+{
+    match sockaddr {
+        SocketAddr::V4(sockaddr_v4) => {
+            let mut prefix_opt = ifs.longest_match_mut(*sockaddr_v4.ip());
+            match prefix_opt {
+                Some((_addr, _plen, mut intf)) => Some(intf),
+                None => None,
+            }
+        },
+        _ => None
+    }
+}
+
+fn main() {
+    let mut v4_ifs = treebitmap::IpLookupTable::new();
+    let mut v6_ifs = treebitmap::IpLookupTable::new();
+
     let addrs = ifaddrs::getifaddrs().unwrap();
     for ifaddr in addrs {
-        let (ip, plen) = ifaddr2prefix(ifaddr.clone());
+        let (ip, plen) = ifaddr_to_prefix(ifaddr.clone());
         let if_index = if_::if_nametoindex(&ifaddr.interface_name[..]).unwrap();
         let intf = IfState {
             if_index: if_index,
@@ -134,40 +152,16 @@ fn init_interfaces(v4_ifs: &mut treebitmap::IpLookupTable<Ipv4Addr, IfState>,
             IpAddr::V6(ip6) => v6_ifs.insert(ip6, plen.into(), intf),
         };
     }
-}
 
-fn intf_for_address<'a>(sockaddr: SocketAddr,
-                        v4_ifs: &'a treebitmap::IpLookupTable<Ipv4Addr, IfState>,
-                        v6_ifs: &'a treebitmap::IpLookupTable<Ipv6Addr, IfState>) -> Option< &'a mut IfState>
-{
-    match sockaddr {
-        SocketAddr::V4(sockaddr_v4) => {
-            match v4_ifs.longest_match(*sockaddr_v4.ip()) {
-                Some((_addr, _plen, intf)) => Some(intf),
-                None => None,
-            }
-        },
-        SocketAddr::V6(sockaddr_v6) => {
-            match v6_ifs.longest_match(*sockaddr_v6.ip()) {
-                Some((_addr, _plen, intf)) => Some(intf),
-                None => None,
-            }
-        },
-    }
-}
-
-fn main() {
-    let mut v4_interfaces = treebitmap::IpLookupTable::new();
-    let mut v6_interfaces = treebitmap::IpLookupTable::new();
-    init_interfaces(&mut v4_interfaces, &mut v6_interfaces);
+    // IPv4 listener
     let std_socket = multicast::join_multicast(&MDNS_IPV4).expect("mDNS IPv4 join_multicast");
     let socket = UdpSocket::from_std(std_socket, &tokio::reactor::Handle::current()).unwrap();
     let (_writer, reader) = UdpFramed::new(socket, BytesCodec::new()).split();
 
     let socket_read = reader.for_each(move |(msg, addr)| {
-        let intf_opt = intf_for_address(addr, &v4_interfaces, &v6_interfaces);
+        let mut intf_opt = intf_for_v4_address(addr, &mut v4_ifs);
         match intf_opt {
-            Some(intf) => {
+            Some(ref mut intf) => {
                 match extract_packet(intf, &msg) {
                     Ok(()) => {},
                     Err(e) => {
