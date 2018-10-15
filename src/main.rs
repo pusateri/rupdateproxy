@@ -68,6 +68,7 @@ fn extract_packet(intf: &mut IfState, buf: &[u8]) -> Result<(), Box<Error>> {
     if msg.header().qr() == false {
         return Ok(());
     }
+
     // cache responses
     for record in msg.answer().unwrap().limit_to::<AllRecordData<ParsedDname>>() {
         if let Ok(record) = record {
@@ -84,6 +85,7 @@ fn extract_packet(intf: &mut IfState, buf: &[u8]) -> Result<(), Box<Error>> {
             };
 
             let v = intf.cache.entry(key.clone()).or_insert(val);
+            println!("caching {}", key.name);
             v.ttl = ttl;
 
             let task = Delay::new(when)
@@ -103,8 +105,12 @@ fn sockaddr_to_ipaddr(sockaddr: Option<socket::SockAddr>) -> Option<IpAddr>
     match sockaddr {
         Some(address) => {
             match address {
-                socket::SockAddr::Inet(socket::InetAddr::V4(addr)) => Some(IpAddr::from(Ipv4Addr::from(addr.sin_addr.s_addr))),
-                socket::SockAddr::Inet(socket::InetAddr::V6(addr)) => Some(IpAddr::from(Ipv6Addr::from(addr.sin6_addr.s6_addr))),
+                socket::SockAddr::Inet(addr) => {
+                    match addr.ip() {
+                        socket::IpAddr::V4(ip4) => Some(IpAddr::V4(ip4.to_std())),
+                        socket::IpAddr::V6(ip6) => Some(IpAddr::V6(ip6.to_std())),
+                    }
+                },
                 _ => None,
             }
         },
@@ -117,6 +123,7 @@ fn ifaddr_to_prefix(ifaddr: ifaddrs::InterfaceAddress) -> Option <ipnetwork::IpN
         Some(ipaddr) => ipaddr,
         None => return None,
     };
+    println!("ip: {}", ip);
     let mask = match sockaddr_to_ipaddr(ifaddr.netmask) {
         Some(netmask) => netmask,
         None => return None,
@@ -137,7 +144,7 @@ fn intf_for_v4_address(sockaddr: SocketAddr,
 {
     match sockaddr {
         SocketAddr::V4(sockaddr_v4) => {
-            let mut prefix_opt = ifs.longest_match_mut(*sockaddr_v4.ip());
+            let prefix_opt = ifs.longest_match_mut(*sockaddr_v4.ip());
             match prefix_opt {
                 Some((_addr, _plen, mut intf)) => Some(intf),
                 None => None,
@@ -155,13 +162,18 @@ fn main() {
     for ifaddr in addrs {
         let (ip, plen) = match ifaddr_to_prefix(ifaddr.clone()) {
             Some(ipnet) => (ipnet.ip(), ipnet.prefix()),
-            None => continue,
+            None => {
+                //println!("interface {} has no address", &ifaddr.interface_name[..]);
+                continue;
+            },
         };
+
         let if_index = if_::if_nametoindex(&ifaddr.interface_name[..]).unwrap();
         let intf = IfState {
             if_index: if_index,
             cache: HashMap::new(),
         };
+        println!("if: {}, ip {}, plen {}", if_index, ip, plen);
         match ip {
             IpAddr::V4(ip4) => v4_ifs.insert(ip4, plen.into(), intf),
             IpAddr::V6(ip6) => v6_ifs.insert(ip6, plen.into(), intf),
@@ -174,8 +186,7 @@ fn main() {
     let (_writer, reader) = UdpFramed::new(socket, BytesCodec::new()).split();
 
     let socket_read = reader.for_each(move |(msg, addr)| {
-        let mut intf_opt = intf_for_v4_address(addr, &mut v4_ifs);
-        match intf_opt {
+        match intf_for_v4_address(addr, &mut v4_ifs) {
             Some(ref mut intf) => {
                 match extract_packet(intf, &msg) {
                     Ok(()) => {},
@@ -184,8 +195,11 @@ fn main() {
                     }
                 }
             },
-            None => (),
+            None => {
+                println!("No interface for addr {:?}", addr);
+            },
         };
+
         Ok(())
     });
 
