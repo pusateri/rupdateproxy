@@ -118,21 +118,52 @@ fn sockaddr_to_ipaddr(sockaddr: Option<socket::SockAddr>) -> Option<IpAddr>
     }
 }
 
+fn mask_address(address: IpAddr, netmask: IpAddr) -> Option <IpAddr>
+{
+    match address {
+        IpAddr::V4(addr4) => {
+            let mut addr = addr4.octets();
+            let mask = match netmask {
+                IpAddr::V4(mask4) => mask4.octets(),
+                IpAddr::V6(_mask6) => return None
+            };
+            for i in 0..addr.len() {
+                addr[i] &= mask[i];
+            }
+            Some(IpAddr::from(Ipv4Addr::from(addr)))
+        },
+        IpAddr::V6(addr6) => {
+            let mut addr = addr6.octets();
+            let mask = match netmask {
+                IpAddr::V4(_mask4) => return None,
+                IpAddr::V6(mask6) => mask6.octets()
+            };
+            for i in 0..addr.len() {
+                addr[i] &= mask[i];
+            }
+            Some(IpAddr::from(Ipv6Addr::from(addr)))
+        },
+    }
+}
+
 fn ifaddr_to_prefix(ifaddr: ifaddrs::InterfaceAddress) -> Option <ipnetwork::IpNetwork> {
     let ip = match sockaddr_to_ipaddr(ifaddr.address) {
         Some(ipaddr) => ipaddr,
         None => return None,
     };
-    println!("ip: {}", ip);
     let mask = match sockaddr_to_ipaddr(ifaddr.netmask) {
         Some(netmask) => netmask,
+        None => return None,
+    };
+    let net = match mask_address(ip, mask) {
+        Some(network) => network,
         None => return None,
     };
     let plen = match ipnetwork::ip_mask_to_prefix(mask) {
         Ok(len) => len,
         Err(_e) => return None,
     };
-    match ipnetwork::IpNetwork::new(ip, plen) {
+    match ipnetwork::IpNetwork::new(net, plen) {
         Ok(ipnet) => return Some(ipnet),
         Err(_e) => return None
     };
@@ -163,7 +194,6 @@ fn main() {
         let (ip, plen) = match ifaddr_to_prefix(ifaddr.clone()) {
             Some(ipnet) => (ipnet.ip(), ipnet.prefix()),
             None => {
-                //println!("interface {} has no address", &ifaddr.interface_name[..]);
                 continue;
             },
         };
@@ -173,7 +203,6 @@ fn main() {
             if_index: if_index,
             cache: HashMap::new(),
         };
-        println!("if: {}, ip {}, plen {}", if_index, ip, plen);
         match ip {
             IpAddr::V4(ip4) => v4_ifs.insert(ip4, plen.into(), intf),
             IpAddr::V6(ip6) => v6_ifs.insert(ip6, plen.into(), intf),
