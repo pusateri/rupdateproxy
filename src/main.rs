@@ -13,7 +13,7 @@ extern crate ipnetwork;
 extern crate lazy_static;
 
 use std::error::Error;
-use std::net::{Ipv4Addr, Ipv6Addr, IpAddr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, IpAddr, SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use futures::Stream;
@@ -23,7 +23,6 @@ use tokio_codec::BytesCodec;
 use tokio::timer::Delay;
 use nix::ifaddrs;
 use nix::net::if_;
-use nix::sys::socket;
 use bytes::Bytes;
 use domain_core::bits::Dname;
 use domain_core::bits::name::{ParsedDname, ToDname};
@@ -31,6 +30,7 @@ use domain_core::bits::message::Message;
 use domain_core::rdata::AllRecordData;
 
 mod multicast;
+mod addrs;
 
 const IP_ALL: [u8; 4] = [0, 0, 0, 0];
 pub const MDNS_PORT: u16 = 5353;
@@ -100,65 +100,11 @@ fn extract_packet(intf: &mut IfState, buf: &[u8]) -> Result<(), Box<Error>> {
     Ok(())
 }
 
-fn sockaddr_to_ipaddr(sockaddr: Option<socket::SockAddr>) -> Option<IpAddr>
-{
-    match sockaddr {
-        Some(address) => {
-            match address {
-                socket::SockAddr::Inet(addr) => {
-                    match addr.ip() {
-                        socket::IpAddr::V4(ip4) => Some(IpAddr::V4(ip4.to_std())),
-                        socket::IpAddr::V6(ip6) => Some(IpAddr::V6(ip6.to_std())),
-                    }
-                },
-                _ => None,
-            }
-        },
-        None => None,
-    }
-}
-
-fn mask_address(address: IpAddr, netmask: IpAddr) -> Option <IpAddr>
-{
-    match address {
-        IpAddr::V4(addr4) => {
-            let mut addr = addr4.octets();
-            let mask = match netmask {
-                IpAddr::V4(mask4) => mask4.octets(),
-                IpAddr::V6(_mask6) => return None
-            };
-            for i in 0..addr.len() {
-                addr[i] &= mask[i];
-            }
-            Some(IpAddr::from(Ipv4Addr::from(addr)))
-        },
-        IpAddr::V6(addr6) => {
-            let mut addr = addr6.octets();
-            let mask = match netmask {
-                IpAddr::V4(_mask4) => return None,
-                IpAddr::V6(mask6) => mask6.octets()
-            };
-            for i in 0..addr.len() {
-                addr[i] &= mask[i];
-            }
-            Some(IpAddr::from(Ipv6Addr::from(addr)))
-        },
-    }
-}
 
 fn ifaddr_to_prefix(ifaddr: ifaddrs::InterfaceAddress) -> Option <ipnetwork::IpNetwork> {
-    let ip = match sockaddr_to_ipaddr(ifaddr.address) {
-        Some(ipaddr) => ipaddr,
-        None => return None,
-    };
-    let mask = match sockaddr_to_ipaddr(ifaddr.netmask) {
-        Some(netmask) => netmask,
-        None => return None,
-    };
-    let net = match mask_address(ip, mask) {
-        Some(network) => network,
-        None => return None,
-    };
+    let ip = addrs::sockaddr_to_ipaddr(ifaddr.address?)?;
+    let mask = addrs::sockaddr_to_ipaddr(ifaddr.netmask?)?;
+    let net = addrs::mask_address(ip, mask)?;
     let plen = match ipnetwork::ip_mask_to_prefix(mask) {
         Ok(len) => len,
         Err(_e) => return None,
@@ -210,7 +156,8 @@ fn main() {
     }
 
     // IPv4 listener
-    let std_socket = multicast::join_multicast(&MDNS_IPV4).expect("mDNS IPv4 join_multicast");
+    let listen_addr = SocketAddr::from(SocketAddrV4::new(IP_ALL.into(), MDNS_PORT));
+    let std_socket = multicast::join_multicast(&MDNS_IPV4, &listen_addr, 0).expect("mDNS IPv4 join_multicast");
     let socket = UdpSocket::from_std(std_socket, &tokio::reactor::Handle::current()).unwrap();
     let (_writer, reader) = UdpFramed::new(socket, BytesCodec::new()).split();
 
