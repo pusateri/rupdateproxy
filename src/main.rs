@@ -17,6 +17,7 @@ use std::error::Error;
 use std::net::{Ipv4Addr, Ipv6Addr, IpAddr, SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use std::process::exit;
 use futures::Stream;
 use tokio::prelude::*;
 use tokio::net::{UdpSocket, UdpFramed};
@@ -136,8 +137,8 @@ fn intf_for_v4_address(sockaddr: SocketAddr,
 struct Options {
     nofork: bool,
     verbose: bool,
-    four: bool,
-    six: bool,
+    nofour: bool,
+    nosix: bool,
     pid_file: String,
     domain: String,
     enable_interfaces: String,
@@ -148,8 +149,8 @@ fn main() {
     let mut options = Options {
         nofork: false,
         verbose: false,
-        four: true,
-        six: true,
+        nofour: false,
+        nosix: false,
         pid_file: "/var/run/rupdateproxy.pid".to_string(),
         domain: "".to_string(),
         enable_interfaces: "en0".to_string(),
@@ -158,12 +159,6 @@ fn main() {
     {
         let mut ap = ArgumentParser::new();
         ap.set_description("DNS Update Proxy");
-        ap.refer(&mut options.four)
-            .add_option(&["-4", "--ipv4"], StoreTrue,
-            "Enable IPv4");
-        ap.refer(&mut options.six)
-        .add_option(&["-6", "--ipv6"], StoreTrue,
-        "Enable IPv6");
         ap.refer(&mut options.nofork)
             .add_option(&["-n", "--nofork"], StoreTrue,
             "Run in foreground");
@@ -174,20 +169,32 @@ fn main() {
             .add_option(&["-i", "--enable-interfaces"], Store,
             "Comma separated list of interface names to include");
         ap.refer(&mut options.disable_interfaces)
-            .add_option(&["-i", "--disable-interfaces"], Store,
+            .add_option(&["-d", "--disable-interfaces"], Store,
             "Comma separated list of interface names to exclude");
         ap.refer(&mut options.pid_file)
             .add_option(&["-p", "--pid-file"], Store,
-            "Domain Suffix (without leading '.'");
+            "path to pid file");
         ap.refer(&mut options.domain)
             .add_option(&["-d", "--domain"], Store,
-            "Domain Suffix (without leading '.'");
+            "Domain Suffix (without leading '.')");
+        ap.refer(&mut options.nofour)
+            .add_option(&["--no-ipv4"], StoreTrue,
+            "Disable IPv4");
+        ap.refer(&mut options.nosix)
+            .add_option(&["--no-ipv6"], StoreTrue,
+            "Disable IPv6");
         ap.parse_args_or_exit();
     }
 
     if options.verbose {
         println!("interfaces enabled {}", options.enable_interfaces);
         println!("interfaces disabled {}", options.disable_interfaces);
+        println!("disable IPv4: {}", options.nofour);
+        println!("disable IPv6: {}", options.nosix);
+    }
+
+    if options.nofour && options.nosix {
+        exit(1);
     }
 
     let mut v4_ifs = treebitmap::IpLookupTable::new();
