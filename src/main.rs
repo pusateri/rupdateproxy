@@ -145,6 +145,41 @@ struct Options {
     disable_interfaces: String,
 }
 
+// parse config options
+fn parse_opts(opts: &mut Options)
+{
+    let mut ap = ArgumentParser::new();
+    ap.set_description("DNS Update Proxy");
+    ap.refer(&mut opts.nofork)
+        .add_option(&["-n", "--nofork"], StoreTrue,
+        "Run in foreground");
+    ap.refer(&mut opts.verbose)
+        .add_option(&["-v", "--verbose"], StoreTrue,
+        "Verbose output to stderr");
+    ap.refer(&mut opts.enable_interfaces)
+        .add_option(&["-i", "--enable-interfaces"], Store,
+        "Comma separated list of interface names to include")
+        .metavar("\"eth0, eth1, etc.\"");
+    ap.refer(&mut opts.disable_interfaces)
+        .add_option(&["-d", "--disable-interfaces"], Store,
+        "Comma separated list of interface names to exclude")
+        .metavar("\"eth0, eth1, etc.\"");
+    ap.refer(&mut opts.pid_file)
+        .add_option(&["-p", "--pid-file"], Store,
+        "Path to pid file")
+        .metavar("<pid-file-path>");
+    ap.refer(&mut opts.domain)
+        .add_option(&["-d", "--domain"], Store,
+        "Domain name suffix (without leading '.')");
+    ap.refer(&mut opts.nofour)
+        .add_option(&["--no-ipv4"], StoreTrue,
+        "Disable IPv4");
+    ap.refer(&mut opts.nosix)
+        .add_option(&["--no-ipv6"], StoreTrue,
+        "Disable IPv6");
+    ap.parse_args_or_exit();
+}
+
 fn main() {
     let mut options = Options {
         nofork: false,
@@ -156,38 +191,7 @@ fn main() {
         enable_interfaces: "en0".to_string(),
         disable_interfaces: "lo0".to_string(),
     };
-    {
-        let mut ap = ArgumentParser::new();
-        ap.set_description("DNS Update Proxy");
-        ap.refer(&mut options.nofork)
-            .add_option(&["-n", "--nofork"], StoreTrue,
-            "Run in foreground");
-        ap.refer(&mut options.verbose)
-            .add_option(&["-v", "--verbose"], StoreTrue,
-            "Verbose output to stderr");
-        ap.refer(&mut options.enable_interfaces)
-            .add_option(&["-i", "--enable-interfaces"], Store,
-            "Comma separated list of interface names to include")
-            .metavar("\"eth0, eth1, etc.\"");
-        ap.refer(&mut options.disable_interfaces)
-            .add_option(&["-d", "--disable-interfaces"], Store,
-            "Comma separated list of interface names to exclude")
-            .metavar("\"eth0, eth1, etc.\"");
-        ap.refer(&mut options.pid_file)
-            .add_option(&["-p", "--pid-file"], Store,
-            "Path to pid file")
-            .metavar("<pid-file-path>");
-        ap.refer(&mut options.domain)
-            .add_option(&["-d", "--domain"], Store,
-            "Domain name suffix (without leading '.')");
-        ap.refer(&mut options.nofour)
-            .add_option(&["--no-ipv4"], StoreTrue,
-            "Disable IPv4");
-        ap.refer(&mut options.nosix)
-            .add_option(&["--no-ipv6"], StoreTrue,
-            "Disable IPv6");
-        ap.parse_args_or_exit();
-    }
+    parse_opts(&mut options);
 
     if options.verbose {
         println!("interfaces enabled {}", options.enable_interfaces);
