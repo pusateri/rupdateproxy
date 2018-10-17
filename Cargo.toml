@@ -16,5 +16,11 @@ socket2 = { version = "0.3.7", features = ["reuseport"] }
 bytes = "*"
 domain-core = "*"
 nix = "*"
+hostname ="*"
 treebitmap = { git = "https://github.com/zesplot/treebitmap.git", branch = "longest_match_mut" }
 ipnetwork = "*"
+jsonpath = "*"
+json-patch = "*"
+shrust = "*"
+argparse = "0.2.2"
+daemonize = "0.3.0"

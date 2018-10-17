@@ -9,6 +9,7 @@ extern crate domain_core;
 extern crate nix;
 extern crate treebitmap;
 extern crate ipnetwork;
+extern crate argparse;
 #[macro_use]
 extern crate lazy_static;
 
@@ -28,6 +29,7 @@ use domain_core::bits::Dname;
 use domain_core::bits::name::{ParsedDname, ToDname};
 use domain_core::bits::message::Message;
 use domain_core::rdata::AllRecordData;
+use argparse::{ArgumentParser, StoreTrue, Store};
 
 mod multicast;
 mod addrs;
@@ -123,7 +125,7 @@ fn intf_for_v4_address(sockaddr: SocketAddr,
         SocketAddr::V4(sockaddr_v4) => {
             let prefix_opt = ifs.longest_match_mut(*sockaddr_v4.ip());
             match prefix_opt {
-                Some((_addr, _plen, mut intf)) => Some(intf),
+                Some((_addr, _plen, intf)) => Some(intf),
                 None => None,
             }
         },
@@ -131,7 +133,63 @@ fn intf_for_v4_address(sockaddr: SocketAddr,
     }
 }
 
+struct Options {
+    nofork: bool,
+    verbose: bool,
+    four: bool,
+    six: bool,
+    pid_file: String,
+    domain: String,
+    enable_interfaces: String,
+    disable_interfaces: String,
+}
+
 fn main() {
+    let mut options = Options {
+        nofork: false,
+        verbose: false,
+        four: true,
+        six: true,
+        pid_file: "/var/run/rupdateproxy.pid".to_string(),
+        domain: "".to_string(),
+        enable_interfaces: "en0".to_string(),
+        disable_interfaces: "lo0".to_string(),
+    };
+    {
+        let mut ap = ArgumentParser::new();
+        ap.set_description("DNS Update Proxy");
+        ap.refer(&mut options.four)
+            .add_option(&["-4", "--ipv4"], StoreTrue,
+            "Enable IPv4");
+        ap.refer(&mut options.six)
+        .add_option(&["-6", "--ipv6"], StoreTrue,
+        "Enable IPv6");
+        ap.refer(&mut options.nofork)
+            .add_option(&["-n", "--nofork"], StoreTrue,
+            "Run in foreground");
+        ap.refer(&mut options.verbose)
+            .add_option(&["-v", "--verbose"], StoreTrue,
+            "Be verbose");
+        ap.refer(&mut options.enable_interfaces)
+            .add_option(&["-i", "--enable-interfaces"], Store,
+            "Comma separated list of interface names to include");
+        ap.refer(&mut options.disable_interfaces)
+            .add_option(&["-i", "--disable-interfaces"], Store,
+            "Comma separated list of interface names to exclude");
+        ap.refer(&mut options.pid_file)
+            .add_option(&["-p", "--pid-file"], Store,
+            "Domain Suffix (without leading '.'");
+        ap.refer(&mut options.domain)
+            .add_option(&["-d", "--domain"], Store,
+            "Domain Suffix (without leading '.'");
+        ap.parse_args_or_exit();
+    }
+
+    if options.verbose {
+        println!("interfaces enabled {}", options.enable_interfaces);
+        println!("interfaces disabled {}", options.disable_interfaces);
+    }
+
     let mut v4_ifs = treebitmap::IpLookupTable::new();
     let mut v6_ifs = treebitmap::IpLookupTable::new();
 
