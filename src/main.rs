@@ -164,19 +164,22 @@ fn main() {
             "Run in foreground");
         ap.refer(&mut options.verbose)
             .add_option(&["-v", "--verbose"], StoreTrue,
-            "Be verbose");
+            "Verbose output to stderr");
         ap.refer(&mut options.enable_interfaces)
             .add_option(&["-i", "--enable-interfaces"], Store,
-            "Comma separated list of interface names to include");
+            "Comma separated list of interface names to include")
+            .metavar("\"eth0, eth1, etc.\"");
         ap.refer(&mut options.disable_interfaces)
             .add_option(&["-d", "--disable-interfaces"], Store,
-            "Comma separated list of interface names to exclude");
+            "Comma separated list of interface names to exclude")
+            .metavar("\"eth0, eth1, etc.\"");
         ap.refer(&mut options.pid_file)
             .add_option(&["-p", "--pid-file"], Store,
-            "path to pid file");
+            "Path to pid file")
+            .metavar("<pid-file-path>");
         ap.refer(&mut options.domain)
             .add_option(&["-d", "--domain"], Store,
-            "Domain Suffix (without leading '.')");
+            "Domain name suffix (without leading '.')");
         ap.refer(&mut options.nofour)
             .add_option(&["--no-ipv4"], StoreTrue,
             "Disable IPv4");
@@ -194,6 +197,7 @@ fn main() {
     }
 
     if options.nofour && options.nosix {
+        println!("Must enable either IPv4, IPv6, or both");
         exit(1);
     }
 
