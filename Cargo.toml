@@ -2,6 +2,7 @@
 name = "rupdateproxy"
 version = "0.1.0"
 authors = ["Tom Pusateri <pusateri@bangj.com>"]
+homepage = "https://github.com/pusateri/rupdateproxy"
 edition = "2018"
 
 [dependencies]
@@ -24,3 +25,6 @@ json-patch = "*"
 shrust = "*"
 argparse = "0.2.2"
 daemonize = "0.3.0"
+
+[build-dependencies]
+git-version = "*"

@@ -30,7 +30,7 @@ use domain_core::bits::Dname;
 use domain_core::bits::name::{ParsedDname, ToDname};
 use domain_core::bits::message::Message;
 use domain_core::rdata::AllRecordData;
-use argparse::{ArgumentParser, StoreTrue, Store};
+use argparse::{ArgumentParser, StoreTrue, Store, Print};
 
 mod multicast;
 mod addrs;
@@ -141,27 +141,34 @@ struct Options {
     nosix: bool,
     pid_file: String,
     domain: String,
-    enable_interfaces: String,
-    disable_interfaces: String,
+    include_interfaces: String,
+    exclude_interfaces: String,
 }
 
 // parse config options
 fn parse_opts(opts: &mut Options)
 {
     let mut ap = ArgumentParser::new();
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    let git_version = env!("PKG_GIT_VERSION").to_string();
+    let package = env!("CARGO_PKG_NAME").to_string();
+    let home = env!("CARGO_PKG_HOMEPAGE").to_string();
+    let vstring = format!("{} {} {} ({})", package, version, git_version, home);
     ap.set_description("DNS Update Proxy");
-    ap.refer(&mut opts.nofork)
-        .add_option(&["-n", "--nofork"], StoreTrue,
-        "Run in foreground");
     ap.refer(&mut opts.verbose)
         .add_option(&["-v", "--verbose"], StoreTrue,
         "Verbose output to stderr");
-    ap.refer(&mut opts.enable_interfaces)
-        .add_option(&["-i", "--enable-interfaces"], Store,
+    ap.add_option(&["-V", "--version"],
+        Print(vstring), "Show version");
+    ap.refer(&mut opts.nofork)
+        .add_option(&["-n", "--nofork"], StoreTrue,
+        "Run in foreground");
+    ap.refer(&mut opts.include_interfaces)
+        .add_option(&["-i", "--include-interfaces"], Store,
         "Comma separated list of interface names to include")
         .metavar("\"eth0, eth1, etc.\"");
-    ap.refer(&mut opts.disable_interfaces)
-        .add_option(&["-d", "--disable-interfaces"], Store,
+    ap.refer(&mut opts.exclude_interfaces)
+        .add_option(&["-x", "--exclude-interfaces"], Store,
         "Comma separated list of interface names to exclude")
         .metavar("\"eth0, eth1, etc.\"");
     ap.refer(&mut opts.pid_file)
@@ -188,20 +195,20 @@ fn main() {
         nosix: false,
         pid_file: "/var/run/rupdateproxy.pid".to_string(),
         domain: "".to_string(),
-        enable_interfaces: "en0".to_string(),
-        disable_interfaces: "lo0".to_string(),
+        include_interfaces: "en0".to_string(),
+        exclude_interfaces: "lo0".to_string(),
     };
     parse_opts(&mut options);
 
     if options.verbose {
-        println!("interfaces enabled {}", options.enable_interfaces);
-        println!("interfaces disabled {}", options.disable_interfaces);
-        println!("disable IPv4: {}", options.nofour);
-        println!("disable IPv6: {}", options.nosix);
+        eprintln!("interfaces included {}", options.include_interfaces);
+        eprintln!("interfaces excluded {}", options.exclude_interfaces);
+        eprintln!("disable IPv4: {}", options.nofour);
+        eprintln!("disable IPv6: {}", options.nosix);
     }
 
     if options.nofour && options.nosix {
-        println!("Must enable either IPv4, IPv6, or both");
+        eprintln!("Must enable either IPv4, IPv6, or both");
         exit(1);
     }
 
@@ -245,7 +252,7 @@ fn main() {
                 }
             },
             None => {
-                println!("No interface for addr {:?}", addr);
+                eprintln!("No interface for addr {:?}", addr);
             },
         };
 
