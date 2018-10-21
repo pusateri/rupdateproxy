@@ -9,7 +9,6 @@ extern crate domain_core;
 extern crate nix;
 extern crate treebitmap;
 extern crate ipnetwork;
-extern crate argparse;
 #[macro_use]
 extern crate lazy_static;
 
@@ -30,10 +29,11 @@ use domain_core::bits::Dname;
 use domain_core::bits::name::{ParsedDname, ToDname};
 use domain_core::bits::message::Message;
 use domain_core::rdata::AllRecordData;
-use argparse::{ArgumentParser, StoreTrue, Store, Print};
+
 
 mod multicast;
 mod addrs;
+mod args;
 
 const IP_ALL: [u8; 4] = [0, 0, 0, 0];
 pub const MDNS_PORT: u16 = 5353;
@@ -120,7 +120,7 @@ fn ifaddr_to_prefix(ifaddr: ifaddrs::InterfaceAddress) -> Option <ipnetwork::IpN
 
 
 fn intf_for_v4_address(sockaddr: SocketAddr,
-                           ifs: &mut treebitmap::IpLookupTable<Ipv4Addr, IfState>) -> Option<&mut IfState>
+                            ifs: &mut treebitmap::IpLookupTable<Ipv4Addr, IfState>) -> Option<&mut IfState>
 {
     match sockaddr {
         SocketAddr::V4(sockaddr_v4) => {
@@ -134,61 +134,23 @@ fn intf_for_v4_address(sockaddr: SocketAddr,
     }
 }
 
-struct Options {
-    nofork: bool,
-    verbose: bool,
-    nofour: bool,
-    nosix: bool,
-    pid_file: String,
-    domain: String,
-    include_interfaces: String,
-    exclude_interfaces: String,
-}
-
-// parse config options
-fn parse_opts(opts: &mut Options)
+fn intf_for_v6_address(sockaddr: SocketAddr,
+                            ifs: &mut treebitmap::IpLookupTable<Ipv6Addr, IfState>) -> Option<&mut IfState>
 {
-    let mut ap = ArgumentParser::new();
-    let version = env!("CARGO_PKG_VERSION").to_string();
-    let git_version = env!("PKG_GIT_VERSION").to_string();
-    let package = env!("CARGO_PKG_NAME").to_string();
-    let home = env!("CARGO_PKG_HOMEPAGE").to_string();
-    let vstring = format!("{} {} {} ({})", package, version, git_version, home);
-    ap.set_description("DNS Update Proxy");
-    ap.refer(&mut opts.verbose)
-        .add_option(&["-v", "--verbose"], StoreTrue,
-        "Verbose output to stderr");
-    ap.add_option(&["-V", "--version"],
-        Print(vstring), "Show version");
-    ap.refer(&mut opts.nofork)
-        .add_option(&["-n", "--nofork"], StoreTrue,
-        "Run in foreground");
-    ap.refer(&mut opts.include_interfaces)
-        .add_option(&["-i", "--include-interfaces"], Store,
-        "Comma separated list of interface names to include")
-        .metavar("\"eth0, eth1, etc.\"");
-    ap.refer(&mut opts.exclude_interfaces)
-        .add_option(&["-x", "--exclude-interfaces"], Store,
-        "Comma separated list of interface names to exclude")
-        .metavar("\"eth0, eth1, etc.\"");
-    ap.refer(&mut opts.pid_file)
-        .add_option(&["-p", "--pid-file"], Store,
-        "Path to pid file")
-        .metavar("<pid-file-path>");
-    ap.refer(&mut opts.domain)
-        .add_option(&["-d", "--domain"], Store,
-        "Domain name suffix (without leading '.')");
-    ap.refer(&mut opts.nofour)
-        .add_option(&["--no-ipv4"], StoreTrue,
-        "Disable IPv4");
-    ap.refer(&mut opts.nosix)
-        .add_option(&["--no-ipv6"], StoreTrue,
-        "Disable IPv6");
-    ap.parse_args_or_exit();
+    match sockaddr {
+        SocketAddr::V6(sockaddr_v6) => {
+            let prefix_opt = ifs.longest_match_mut(*sockaddr_v6.ip());
+            match prefix_opt {
+                Some((_addr, _plen, intf)) => Some(intf),
+                None => None,
+            }
+        },
+        _ => None
+    }
 }
 
 fn main() {
-    let mut options = Options {
+    let mut options = args::Options {
         nofork: false,
         verbose: false,
         nofour: false,
@@ -198,7 +160,7 @@ fn main() {
         include_interfaces: "en0".to_string(),
         exclude_interfaces: "lo0".to_string(),
     };
-    parse_opts(&mut options);
+    args::parse_opts(&mut options);
 
     if options.verbose {
         eprintln!("interfaces included {}", options.include_interfaces);
@@ -236,13 +198,37 @@ fn main() {
     }
 
     // IPv4 listener
-    let listen_addr = SocketAddr::from(SocketAddrV4::new(IP_ALL.into(), MDNS_PORT));
-    let std_socket = multicast::join_multicast(&MDNS_IPV4, &listen_addr, 0).expect("mDNS IPv4 join_multicast");
-    let socket = UdpSocket::from_std(std_socket, &tokio::reactor::Handle::current()).unwrap();
-    let (_writer, reader) = UdpFramed::new(socket, BytesCodec::new()).split();
+    let v4_listen_addr = SocketAddr::from(SocketAddrV4::new(IP_ALL.into(), MDNS_PORT));
+    
+    let v4_std_socket = multicast::join_multicast(&MDNS_IPV4, &v4_listen_addr, 0).expect("mDNS IPv4 join_multicast");
+    let v4_socket = UdpSocket::from_std(v4_std_socket, &tokio::reactor::Handle::current()).unwrap();
+    let (_v4_writer, v4_reader) = UdpFramed::new(v4_socket, BytesCodec::new()).split();
 
-    let socket_read = reader.for_each(move |(msg, addr)| {
+    let v4_socket_read = v4_reader.for_each(move |(msg, addr)| {
         match intf_for_v4_address(addr, &mut v4_ifs) {
+            Some(ref mut intf) => {
+                match extract_packet(intf, &msg) {
+                    Ok(()) => {},
+                    Err(e) => {
+                        eprintln!("Error from {}: {}", addr, e);
+                    }
+                }
+            },
+            None => {
+                eprintln!("No interface for addr {:?}", addr);
+            },
+        };
+
+        Ok(())
+    });
+    
+
+    let v6_std_socket = multicast::join_multicast(&MDNS_IPV6, &v4_listen_addr, 0).expect("mDNS IPv6 join_multicast");
+    let v6_socket = UdpSocket::from_std(v6_std_socket, &tokio::reactor::Handle::current()).unwrap();
+    let (_v6_writer, v6_reader) = UdpFramed::new(v6_socket, BytesCodec::new()).split();
+
+    let v6_socket_read = v6_reader.for_each(move |(msg, addr)| {
+        match intf_for_v6_address(addr, &mut v6_ifs) {
             Some(ref mut intf) => {
                 match extract_packet(intf, &msg) {
                     Ok(()) => {},
@@ -260,7 +246,8 @@ fn main() {
     });
 
     tokio::run({
-        socket_read.map(|_| ())
-                   .map_err(|e| println!("error = {:?}", e))
+        v4_socket_read.join(v6_socket_read)
+                      .map(|_| ())
+                      .map_err(|e| println!("error = {:?}", e))
     });
 }
