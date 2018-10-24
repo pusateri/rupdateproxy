@@ -1,6 +1,6 @@
 extern crate argparse;
 
-use argparse::{ArgumentParser, StoreTrue, Store, Print};
+use self::argparse::{ArgumentParser, StoreTrue, Store, Print};
 
 pub struct Options {
     pub(crate) nofork: bool,

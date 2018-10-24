@@ -3,7 +3,6 @@ name = "rupdateproxy"
 version = "0.1.0"
 authors = ["Tom Pusateri <pusateri@bangj.com>"]
 homepage = "https://github.com/pusateri/rupdateproxy"
-edition = "2018"
 
 [dependencies]
 tokio = "0.1"
