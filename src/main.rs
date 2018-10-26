@@ -1,11 +1,10 @@
 extern crate socket2;
-extern crate futures;
 extern crate tokio;
 extern crate tokio_codec;
-extern crate tokio_io;
 extern crate tokio_timer;
 extern crate bytes;
 extern crate domain_core;
+//extern crate domain_resolv;
 extern crate nix;
 extern crate treebitmap;
 extern crate ipnetwork;
@@ -16,8 +15,9 @@ use std::error::Error;
 use std::net::{Ipv4Addr, Ipv6Addr, IpAddr, SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::process::exit;
-use futures::Stream;
+//use futures::Stream;
 use tokio::prelude::*;
 use tokio::net::{UdpSocket, UdpFramed};
 use tokio_codec::BytesCodec;
@@ -87,17 +87,25 @@ fn extract_packet(intf: &mut IfState, buf: &[u8]) -> Result<(), Box<Error>> {
                 ttl: ttl,
             };
 
-            let v = intf.cache.entry(key.clone()).or_insert(val);
-            println!("caching {}", key.name);
-            v.ttl = ttl;
-
-            let task = Delay::new(when)
-                .and_then(move |_| {
-                    println!("timeout for {}", key.name);
-                    Ok(())
-                })
-                .map_err(|e| panic!("delay errored; err={:?}", e));
-            tokio::spawn(task);
+            let _v = match intf.cache.entry(key.clone()) {
+                Vacant(entry) => {
+                    println!("caching {} + {:?} on ifindex: {}", key.name, key.data, intf.if_index);
+                    let task = Delay::new(when)
+                        .and_then(move |_| {
+                            println!("timeout for {} + {:?}", key.name, key.data);
+                            Ok(())
+                        })
+                        .map_err(|e| panic!("delay errored; err={:?}", e));
+                    tokio::spawn(task);
+                    entry.insert(val)
+                },
+                Occupied(exists) => {
+                    println!("found: {} + {:?} on ifindex: {}", key.name, key.data, intf.if_index);
+                    let mut entry = exists.into_mut();
+                    entry.ttl = ttl;
+                    entry
+                },
+            };
         }
     }
     Ok(())
@@ -157,8 +165,8 @@ fn main() {
         nosix: false,
         pid_file: "/var/run/rupdateproxy.pid".to_string(),
         domain: "".to_string(),
-        include_interfaces: "en0".to_string(),
-        exclude_interfaces: "lo0".to_string(),
+        include_interfaces: "".to_string(),
+        exclude_interfaces: "".to_string(),
     };
     args::parse_opts(&mut options);
 

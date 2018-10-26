@@ -5,16 +5,14 @@ authors = ["Tom Pusateri <pusateri@bangj.com>"]
 homepage = "https://github.com/pusateri/rupdateproxy"
 
 [dependencies]
-tokio = "0.1"
-tokio-codec = "0.1"
-tokio-core = "0.1"
-tokio-io = "0.1"
-tokio-timer = "0.2"
-futures = "0.1"
+tokio = "*"
+tokio-codec = "*"
+tokio-timer = "*"
 lazy_static = "^1.0"
 socket2 = { version = "0.3.7", features = ["reuseport"] }
 bytes = "*"
-domain-core = "*"
+domain-core = { git = "https://github.com/pusateri/domain-core.git" }
+#domain-resolv-preview = { git = "https://github.com/pusateri/domain-core.git" }
 nix = "*"
 hostname ="*"
 treebitmap = { git = "https://github.com/zesplot/treebitmap.git", branch = "longest_match_mut" }
