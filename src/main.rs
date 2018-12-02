@@ -1,39 +1,38 @@
+extern crate bytes;
+extern crate domain_core;
 extern crate socket2;
 extern crate tokio;
 extern crate tokio_codec;
 extern crate tokio_timer;
-extern crate bytes;
-extern crate domain_core;
 //extern crate domain_resolv;
+extern crate ipnetwork;
 extern crate nix;
 extern crate treebitmap;
-extern crate ipnetwork;
 #[macro_use]
 extern crate lazy_static;
 
-use std::error::Error;
-use std::net::{Ipv4Addr, Ipv6Addr, IpAddr, SocketAddr, SocketAddrV4};
-use std::time::{Duration, Instant};
-use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::collections::HashMap;
+use std::error::Error;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use std::process::exit;
+use std::time::{Duration, Instant};
 //use futures::Stream;
-use tokio::prelude::*;
-use tokio::net::{UdpSocket, UdpFramed};
-use tokio_codec::BytesCodec;
-use tokio::timer::Delay;
+use bytes::Bytes;
+use domain_core::bits::message::Message;
+use domain_core::bits::name::{ParsedDname, ToDname};
+use domain_core::bits::Dname;
+use domain_core::rdata::AllRecordData;
 use nix::ifaddrs;
 use nix::net::if_;
-use bytes::Bytes;
-use domain_core::bits::Dname;
-use domain_core::bits::name::{ParsedDname, ToDname};
-use domain_core::bits::message::Message;
-use domain_core::rdata::AllRecordData;
+use tokio::net::{UdpFramed, UdpSocket};
+use tokio::prelude::*;
+use tokio::timer::Delay;
+use tokio_codec::BytesCodec;
 
-
-mod multicast;
 mod addrs;
 mod args;
+mod multicast;
 
 const IP_ALL: [u8; 4] = [0, 0, 0, 0];
 pub const MDNS_PORT: u16 = 5353;
@@ -46,8 +45,8 @@ lazy_static! {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RecordKey {
-   name: Dname,
-   data: AllRecordData<ParsedDname>,
+    name: Dname,
+    data: AllRecordData<ParsedDname>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -73,7 +72,11 @@ fn extract_packet(intf: &mut IfState, buf: &[u8]) -> Result<(), Box<Error>> {
     }
 
     // cache responses
-    for record in msg.answer().unwrap().limit_to::<AllRecordData<ParsedDname>>() {
+    for record in msg
+        .answer()
+        .unwrap()
+        .limit_to::<AllRecordData<ParsedDname>>()
+    {
         if let Ok(record) = record {
             let key = RecordKey {
                 name: record.owner().to_name(),
@@ -83,13 +86,14 @@ fn extract_packet(intf: &mut IfState, buf: &[u8]) -> Result<(), Box<Error>> {
             let duration = Duration::from_secs(ttl.into());
 
             let when = Instant::now() + duration;
-            let val = RecordInfo {
-                ttl: ttl,
-            };
+            let val = RecordInfo { ttl: ttl };
 
             let _v = match intf.cache.entry(key.clone()) {
                 Vacant(entry) => {
-                    println!("caching {} + {:?} on ifindex: {}", key.name, key.data, intf.if_index);
+                    println!(
+                        "caching {} + {:?} on ifindex: {}",
+                        key.name, key.data, intf.if_index
+                    );
                     let task = Delay::new(when)
                         .and_then(move |_| {
                             println!("timeout for {} + {:?}", key.name, key.data);
@@ -98,21 +102,23 @@ fn extract_packet(intf: &mut IfState, buf: &[u8]) -> Result<(), Box<Error>> {
                         .map_err(|e| panic!("delay errored; err={:?}", e));
                     tokio::spawn(task);
                     entry.insert(val)
-                },
+                }
                 Occupied(exists) => {
-                    println!("found: {} + {:?} on ifindex: {}", key.name, key.data, intf.if_index);
+                    println!(
+                        "found: {} + {:?} on ifindex: {}",
+                        key.name, key.data, intf.if_index
+                    );
                     let mut entry = exists.into_mut();
                     entry.ttl = ttl;
                     entry
-                },
+                }
             };
         }
     }
     Ok(())
 }
 
-
-fn ifaddr_to_prefix(ifaddr: ifaddrs::InterfaceAddress) -> Option <ipnetwork::IpNetwork> {
+fn ifaddr_to_prefix(ifaddr: ifaddrs::InterfaceAddress) -> Option<ipnetwork::IpNetwork> {
     let ip = addrs::sockaddr_to_ipaddr(ifaddr.address?)?;
     let mask = addrs::sockaddr_to_ipaddr(ifaddr.netmask?)?;
     let net = addrs::mask_address(ip, mask)?;
@@ -122,14 +128,14 @@ fn ifaddr_to_prefix(ifaddr: ifaddrs::InterfaceAddress) -> Option <ipnetwork::IpN
     };
     match ipnetwork::IpNetwork::new(net, plen) {
         Ok(ipnet) => return Some(ipnet),
-        Err(_e) => return None
+        Err(_e) => return None,
     };
 }
 
-
-fn intf_for_v4_address(sockaddr: SocketAddr,
-                            ifs: &mut treebitmap::IpLookupTable<Ipv4Addr, IfState>) -> Option<&mut IfState>
-{
+fn intf_for_v4_address(
+    sockaddr: SocketAddr,
+    ifs: &mut treebitmap::IpLookupTable<Ipv4Addr, IfState>,
+) -> Option<&mut IfState> {
     match sockaddr {
         SocketAddr::V4(sockaddr_v4) => {
             let prefix_opt = ifs.longest_match_mut(*sockaddr_v4.ip());
@@ -137,14 +143,15 @@ fn intf_for_v4_address(sockaddr: SocketAddr,
                 Some((_addr, _plen, intf)) => Some(intf),
                 None => None,
             }
-        },
-        _ => None
+        }
+        _ => None,
     }
 }
 
-fn intf_for_v6_address(sockaddr: SocketAddr,
-                            ifs: &mut treebitmap::IpLookupTable<Ipv6Addr, IfState>) -> Option<&mut IfState>
-{
+fn intf_for_v6_address(
+    sockaddr: SocketAddr,
+    ifs: &mut treebitmap::IpLookupTable<Ipv6Addr, IfState>,
+) -> Option<&mut IfState> {
     match sockaddr {
         SocketAddr::V6(sockaddr_v6) => {
             let prefix_opt = ifs.longest_match_mut(*sockaddr_v6.ip());
@@ -152,8 +159,8 @@ fn intf_for_v6_address(sockaddr: SocketAddr,
                 Some((_addr, _plen, intf)) => Some(intf),
                 None => None,
             }
-        },
-        _ => None
+        }
+        _ => None,
     }
 }
 
@@ -191,7 +198,7 @@ fn main() {
             Some(ipnet) => (ipnet.ip(), ipnet.prefix()),
             None => {
                 continue;
-            },
+            }
         };
 
         let if_index = if_::if_nametoindex(&ifaddr.interface_name[..]).unwrap();
@@ -207,55 +214,53 @@ fn main() {
 
     // IPv4 listener
     let v4_listen_addr = SocketAddr::from(SocketAddrV4::new(IP_ALL.into(), MDNS_PORT));
-    
-    let v4_std_socket = multicast::join_multicast(&MDNS_IPV4, &v4_listen_addr, 0).expect("mDNS IPv4 join_multicast");
+
+    let v4_std_socket = multicast::join_multicast(&MDNS_IPV4, &v4_listen_addr, 0)
+        .expect("mDNS IPv4 join_multicast");
     let v4_socket = UdpSocket::from_std(v4_std_socket, &tokio::reactor::Handle::current()).unwrap();
     let (_v4_writer, v4_reader) = UdpFramed::new(v4_socket, BytesCodec::new()).split();
 
     let v4_socket_read = v4_reader.for_each(move |(msg, addr)| {
         match intf_for_v4_address(addr, &mut v4_ifs) {
-            Some(ref mut intf) => {
-                match extract_packet(intf, &msg) {
-                    Ok(()) => {},
-                    Err(e) => {
-                        eprintln!("Error from {}: {}", addr, e);
-                    }
+            Some(ref mut intf) => match extract_packet(intf, &msg) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("Error from {}: {}", addr, e);
                 }
             },
             None => {
                 eprintln!("No interface for addr {:?}", addr);
-            },
+            }
         };
 
         Ok(())
     });
-    
 
-    let v6_std_socket = multicast::join_multicast(&MDNS_IPV6, &v4_listen_addr, 0).expect("mDNS IPv6 join_multicast");
+    let v6_std_socket = multicast::join_multicast(&MDNS_IPV6, &v4_listen_addr, 0)
+        .expect("mDNS IPv6 join_multicast");
     let v6_socket = UdpSocket::from_std(v6_std_socket, &tokio::reactor::Handle::current()).unwrap();
     let (_v6_writer, v6_reader) = UdpFramed::new(v6_socket, BytesCodec::new()).split();
 
     let v6_socket_read = v6_reader.for_each(move |(msg, addr)| {
         match intf_for_v6_address(addr, &mut v6_ifs) {
-            Some(ref mut intf) => {
-                match extract_packet(intf, &msg) {
-                    Ok(()) => {},
-                    Err(e) => {
-                        eprintln!("Error from {}: {}", addr, e);
-                    }
+            Some(ref mut intf) => match extract_packet(intf, &msg) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("Error from {}: {}", addr, e);
                 }
             },
             None => {
                 eprintln!("No interface for addr {:?}", addr);
-            },
+            }
         };
 
         Ok(())
     });
 
     tokio::run({
-        v4_socket_read.join(v6_socket_read)
-                      .map(|_| ())
-                      .map_err(|e| println!("error = {:?}", e))
+        v4_socket_read
+            .join(v6_socket_read)
+            .map(|_| ())
+            .map_err(|e| println!("error = {:?}", e))
     });
 }
