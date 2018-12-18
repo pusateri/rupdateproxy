@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<svg viewBox="0 0 500 500" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="0 0 545.157 412.958" xmlns="http://www.w3.org/2000/svg">
+  <title>rupdateproxy architecture</title>
   <g>
     <rect x="203.534" y="37.952" width="85.733" height="58.906" style="fill: none; stroke: rgb(0, 51, 153);"/>
     <text style="fill: rgb(51, 51, 51); font-size: 16px; white-space: pre; text-anchor: middle;" x="246.728" y="77.88" transform="matrix(1, 0, 0, 1, 0.705214, -12.693847)">Receiver<tspan x="246.72799682617188" dy="1em">​</tspan>module</text>
