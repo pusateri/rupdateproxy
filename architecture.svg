@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<svg viewBox="0 0 545.157 412.958" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="-28.107 -44.323 573.264 457.281" xmlns="http://www.w3.org/2000/svg">
   <title>rupdateproxy architecture</title>
   <g>
     <rect x="203.534" y="37.952" width="85.733" height="58.906" style="fill: none; stroke: rgb(0, 51, 153);"/>
@@ -10,8 +10,9 @@
     <rect x="194.045" y="276.832" width="92.278" height="68.063" style="fill: none; stroke: rgb(0, 51, 153);"/>
   </g>
   <g transform="matrix(1, 0, 0, 1, 0, -22.251308)">
-    <text style="fill: rgb(51, 51, 51); font-size: 16px; white-space: pre; text-anchor: middle;" x="243.348" y="185.541">UPDATE<tspan x="243.34800720214844" dy="1em">​</tspan>module<tspan x="243.34800720214844" dy="1em">​</tspan>cache<tspan x="243.34800720214844" dy="1em">​</tspan>filter<tspan x="243.34800720214844" dy="1em">​</tspan>translate</text>
+    <text style="fill: rgb(51, 51, 51); font-size: 16px; white-space: pre; text-anchor: middle;" x="243.348" y="185.541">UPDATE<tspan x="243.34800720214844" dy="1em">​</tspan>module<tspan x="243.34800720214844" dy="1em">​</tspan></text>
     <rect x="187.5" y="162.304" width="109.948" height="100.785" style="fill: none; stroke: rgb(0, 51, 153);"/>
+    <text style="fill: rgb(51, 51, 51); font-size: 12px; white-space: pre;" transform="matrix(1, 0, 0, 1, -24.863962, -4.324167)"><tspan x="225.397" y="231.433">cache</tspan><tspan x="225.397" dy="1em">​</tspan><tspan>filter</tspan><tspan x="225.397" dy="1em">​</tspan><tspan>translate</tspan></text>
   </g>
   <g transform="matrix(1, 0, 0, 1, -10.471204, -14.397905)">
     <text style="fill: rgb(51, 51, 51); font-size: 16px; white-space: pre; text-anchor: middle;" x="94.133" y="80.175">Config<tspan x="94.13300323486328" dy="1em">​</tspan>module</text>
@@ -24,7 +25,11 @@
   <line style="stroke: rgb(0, 0, 0);" x1="123.69109970803865" y1="68.71727761557703" x2="204.18848205771465" y2="68.71727761557703"/>
   <line style="stroke: rgb(0, 0, 0);" x1="369.764398598105" y1="68.06282735257155" x2="289.26701624842906" y2="66.75392682656054"/>
   <line style="stroke: rgb(0, 0, 0);" x1="244.11" y1="96.204" x2="243.455" y2="139.398"/>
-  <line style="stroke: rgb(0, 0, 0);" x1="240.1832465230169" y1="240.83769678602238" x2="240.1832465230169" y2="276.8324612513246"/>
+  <g>
+    <line x1="240.183" y1="240.838" x2="240.183" y2="276.832" style="stroke: rgb(255, 0, 0);"/>
+    <line x1="240.183" y1="276.178" x2="244.11" y2="270.288" style="stroke: rgb(255, 0, 0);"/>
+    <line x1="239.529" y1="275.524" x2="235.602" y2="270.288" style="stroke: rgb(255, 0, 0);"/>
+  </g>
   <line style="stroke: rgb(0, 0, 0);" x1="88.35078550574192" y1="94.89528813579686" x2="187.82722548257723" y2="190.4450265345992"/>
   <line style="stroke: rgb(0, 0, 0);" x1="414.2670164824787" y1="98.82198971382984" x2="297.12041940449495" y2="190.4450265345992"/>
   <line style="stroke: rgb(0, 0, 0);" x1="202.22513126869814" y1="68.71727761557703" x2="196.33507890164867" y2="73.952879719621"/>
@@ -35,8 +40,6 @@
   <line style="stroke: rgb(0, 0, 0);" x1="297.77486966750047" y1="189.79057627159372" x2="300.39267071952247" y2="180.62827258951677"/>
   <line style="stroke: rgb(0, 0, 0);" x1="187.8272254825772" y1="189.13612600858823" x2="173.42931969645633" y2="189.13612600858823"/>
   <line style="stroke: rgb(0, 0, 0);" x1="185.86387469356072" y1="187.82722548257723" x2="183.24607364153877" y2="177.3560212744893"/>
-  <line style="stroke: rgb(0, 0, 0);" x1="240.18324652301686" y1="276.17801098831916" x2="244.10994810104984" y2="270.2879586212697"/>
-  <line style="stroke: rgb(0, 0, 0);" x1="239.52879626001135" y1="275.52356072531364" x2="235.60209468197837" y2="270.2879586212697"/>
   <line style="stroke: rgb(0, 0, 0);" x1="242.80104757503887" y1="140.70680654618155" x2="251.30890099411033" y2="132.8534033901156"/>
   <line style="stroke: rgb(0, 0, 0);" x1="242.9642937622027" y1="139.682317602262" x2="236.91424867784056" y2="132.96004528630414"/>
   <text style="fill: rgb(51, 51, 51); font-size: 12px; white-space: pre;" x="246.998" y="117.498">Service events</text>
@@ -45,5 +48,10 @@
   <text style="fill: rgb(51, 51, 51); font-size: 12px; white-space: pre;" x="39.611" y="150.449" transform="matrix(1, 0, 0, 1, 35.157707, -4.643471)">config<tspan x="39.611000061035156" dy="1em">​</tspan>events</text>
   <text style="fill: rgb(51, 51, 51); font-size: 12px; white-space: pre;" x="250.018" y="260.695">DNS UPDATES</text>
   <text style="fill: rgb(51, 51, 51); font-size: 12px; white-space: pre;" x="122.967" y="48.943" transform="matrix(1, 0, 0, 1, 192.090561, -7.424863)">interface<tspan x="122.96700286865234" dy="1em">​</tspan>events</text>
-  <text style="fill: rgb(51, 51, 51); font-size: 12px; white-space: pre;"><tspan x="21.811" y="303.593">rupdateproxy</tspan><tspan x="21.811" dy="1em">​</tspan><tspan>architechture</tspan><tspan x="21.811" dy="1em">​</tspan><tspan>12/18/2018</tspan></text>
+  <text transform="matrix(1, 0, 0, 1, -2.702605, -63.781467)" style="fill: rgb(186, 218, 85); font-size: 12px; white-space: pre;"><tspan x="21.811" y="303.593">rupdateproxy</tspan><tspan x="21.811" dy="1em">​</tspan></text>
+  <rect x="14.054" y="22.702" width="490.793" height="224.316" style="fill: none; stroke: rgb(186, 218, 85);"/>
+  <line x1="247.0180624515448" y1="7.026772017221191" x2="246.4775415271432" y2="38.37698563251571" style="stroke: rgb(255, 0, 0);"/>
+  <line x1="246.4775415271432" y1="36.755422859310826" x2="252.96379261996273" y2="30.269171766491272" style="stroke: rgb(255, 0, 0);"/>
+  <line x1="245.93702060274157" y1="36.21490193490919" x2="239.99129043432364" y2="32.43125546409779" style="stroke: rgb(255, 0, 0);"/>
+  <text style="fill: rgb(51, 51, 51); font-size: 12px; white-space: pre;" x="258.305" y="16.619">mDNS advertisements</text>
 </svg>
