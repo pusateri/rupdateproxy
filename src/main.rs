@@ -1,15 +1,3 @@
-extern crate socket2;
-extern crate tokio;
-extern crate tokio_codec;
-extern crate tokio_timer;
-extern crate bytes;
-extern crate domain_core;
-//extern crate domain_resolv;
-extern crate nix;
-extern crate treebitmap;
-extern crate ipnetwork;
-#[macro_use]
-extern crate lazy_static;
 
 use std::error::Error;
 use std::net::{Ipv4Addr, Ipv6Addr, IpAddr, SocketAddr, SocketAddrV4};
@@ -17,22 +5,21 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::process::exit;
-//use futures::Stream;
 use tokio::prelude::*;
 use tokio::net::{UdpSocket, UdpFramed};
 use tokio_codec::BytesCodec;
 use tokio::timer::Delay;
-use nix::ifaddrs;
-use nix::net::if_;
 use bytes::Bytes;
 use domain_core::bits::Dname;
 use domain_core::bits::name::{ParsedDname, ToDname};
 use domain_core::bits::message::Message;
 use domain_core::rdata::AllRecordData;
+use lazy_static::lazy_static;
+use treebitmap;
+use interface_events::{get_current_events, IfEvent};
 
 
 mod multicast;
-mod addrs;
 mod args;
 
 const IP_ALL: [u8; 4] = [0, 0, 0, 0];
@@ -112,21 +99,6 @@ fn extract_packet(intf: &mut IfState, buf: &[u8]) -> Result<(), Box<Error>> {
 }
 
 
-fn ifaddr_to_prefix(ifaddr: ifaddrs::InterfaceAddress) -> Option <ipnetwork::IpNetwork> {
-    let ip = addrs::sockaddr_to_ipaddr(ifaddr.address?)?;
-    let mask = addrs::sockaddr_to_ipaddr(ifaddr.netmask?)?;
-    let net = addrs::mask_address(ip, mask)?;
-    let plen = match ipnetwork::ip_mask_to_prefix(mask) {
-        Ok(len) => len,
-        Err(_e) => return None,
-    };
-    match ipnetwork::IpNetwork::new(net, plen) {
-        Ok(ipnet) => return Some(ipnet),
-        Err(_e) => return None
-    };
-}
-
-
 fn intf_for_v4_address(sockaddr: SocketAddr,
                             ifs: &mut treebitmap::IpLookupTable<Ipv4Addr, IfState>) -> Option<&mut IfState>
 {
@@ -185,23 +157,17 @@ fn main() {
     let mut v4_ifs = treebitmap::IpLookupTable::new();
     let mut v6_ifs = treebitmap::IpLookupTable::new();
 
-    let addrs = ifaddrs::getifaddrs().unwrap();
-    for ifaddr in addrs {
-        let (ip, plen) = match ifaddr_to_prefix(ifaddr.clone()) {
-            Some(ipnet) => (ipnet.ip(), ipnet.prefix()),
-            None => {
-                continue;
-            },
-        };
-
-        let if_index = if_::if_nametoindex(&ifaddr.interface_name[..]).unwrap();
+    let events = get_current_events()
+            .into_iter()
+            .filter(|event| IfEvent::not_loopback(event));
+    for event in events {
         let intf = IfState {
-            if_index: if_index,
+            if_index: event.ifindex,
             cache: HashMap::new(),
         };
-        match ip {
-            IpAddr::V4(ip4) => v4_ifs.insert(ip4, plen.into(), intf),
-            IpAddr::V6(ip6) => v6_ifs.insert(ip6, plen.into(), intf),
+        match event.ip {
+            IpAddr::V4(ip4) => v4_ifs.insert(ip4, event.plen.into(), intf),
+            IpAddr::V6(ip6) => v6_ifs.insert(ip6, event.plen.into(), intf),
         };
     }
 
