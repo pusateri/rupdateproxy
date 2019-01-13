@@ -4,6 +4,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, IpAddr, SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::thread;
 use std::process::exit;
 use tokio::prelude::*;
 use tokio::net::{UdpSocket, UdpFramed};
@@ -17,10 +18,13 @@ use domain_core::rdata::AllRecordData;
 use lazy_static::lazy_static;
 use treebitmap;
 use interface_events::{get_current_events, IfEvent};
+use crossbeam_channel::Sender;
+use crate::services::{ServiceEvent, ServiceAction};
 
 
 mod multicast;
 mod args;
+mod services;
 
 const IP_ALL: [u8; 4] = [0, 0, 0, 0];
 pub const MDNS_PORT: u16 = 5353;
@@ -42,71 +46,42 @@ struct RecordInfo {
     ttl: u32,
 }
 
-struct IfState {
-    if_index: u32,
-    cache: HashMap<RecordKey, RecordInfo>,
-}
-
-// extract the buffer into a Packet struct and filter duplicates
-fn extract_packet(intf: &mut IfState, buf: &[u8]) -> Result<(), Box<Error>> {
-    let msg = Message::from_bytes(Bytes::from(buf)).unwrap();
+// extract the received packet buffer into a Service Event and send on shared channel
+fn extract_packet(ifindex: u32, buf: &[u8], tx: &Sender<services::ServiceEvent>) -> Result<(), Box<Error>>
+{
+    let msg = Message::from_bytes(Bytes::from(buf)).expect("DNS Message::from_bytes failed");
 
     if msg.is_error() {
         return Ok(());
     }
-
     if msg.header().qr() == false {
         return Ok(());
     }
 
-    // cache responses
     for record in msg.answer().unwrap().limit_to::<AllRecordData<ParsedDname>>() {
         if let Ok(record) = record {
-            let key = RecordKey {
-                name: record.owner().to_name(),
-                data: record.data().clone(),
-            };
-            let ttl = record.ttl();
-            let duration = Duration::from_secs(ttl.into());
-
-            let when = Instant::now() + duration;
-            let val = RecordInfo {
-                ttl: ttl,
-            };
-
-            let _v = match intf.cache.entry(key.clone()) {
-                Vacant(entry) => {
-                    println!("caching {} + {:?} on ifindex: {}", key.name, key.data, intf.if_index);
-                    let task = Delay::new(when)
-                        .and_then(move |_| {
-                            println!("timeout for {} + {:?}", key.name, key.data);
-                            Ok(())
-                        })
-                        .map_err(|e| panic!("delay errored; err={:?}", e));
-                    tokio::spawn(task);
-                    entry.insert(val)
-                },
-                Occupied(exists) => {
-                    println!("found: {} + {:?} on ifindex: {}", key.name, key.data, intf.if_index);
-                    let mut entry = exists.into_mut();
-                    entry.ttl = ttl;
-                    entry
-                },
-            };
+            let se = ServiceEvent::new(
+                ServiceAction::DYNAMIC,
+                record.owner().to_name(),
+                record.data().clone(),
+                ifindex,
+                record.ttl(),
+            );
+            tx.send(se).expect("Send ServiceEvent");
         }
     }
     Ok(())
 }
 
 
-fn intf_for_v4_address(sockaddr: SocketAddr,
-                            ifs: &mut treebitmap::IpLookupTable<Ipv4Addr, IfState>) -> Option<&mut IfState>
+fn index_for_v4_address(sockaddr: SocketAddr,
+                             ifs: &treebitmap::IpLookupTable<Ipv4Addr, u32>) -> Option<u32>
 {
     match sockaddr {
         SocketAddr::V4(sockaddr_v4) => {
-            let prefix_opt = ifs.longest_match_mut(*sockaddr_v4.ip());
+            let prefix_opt = ifs.longest_match(*sockaddr_v4.ip());
             match prefix_opt {
-                Some((_addr, _plen, intf)) => Some(intf),
+                Some((_addr, _plen, ifindex)) => Some(*ifindex),
                 None => None,
             }
         },
@@ -114,18 +89,34 @@ fn intf_for_v4_address(sockaddr: SocketAddr,
     }
 }
 
-fn intf_for_v6_address(sockaddr: SocketAddr,
-                            ifs: &mut treebitmap::IpLookupTable<Ipv6Addr, IfState>) -> Option<&mut IfState>
+fn index_for_v6_address(sockaddr: SocketAddr,
+                             ifs: &treebitmap::IpLookupTable<Ipv6Addr, u32>) -> Option<u32>
 {
     match sockaddr {
         SocketAddr::V6(sockaddr_v6) => {
-            let prefix_opt = ifs.longest_match_mut(*sockaddr_v6.ip());
+            let prefix_opt = ifs.longest_match(*sockaddr_v6.ip());
             match prefix_opt {
-                Some((_addr, _plen, intf)) => Some(intf),
+                Some((_addr, _plen, ifindex)) => Some(*ifindex),
                 None => None,
             }
         },
         _ => None
+    }
+}
+
+fn index_interface_trees_init(v4_ifs: &mut treebitmap::IpLookupTable<std::net::Ipv4Addr, u32>,
+                              v6_ifs: &mut treebitmap::IpLookupTable<std::net::Ipv6Addr, u32>)
+{
+    // lookup ifindex by source IP address until we have IN_PKTINFO/RECV_IF
+    
+    let events = get_current_events()
+            .into_iter()
+            .filter(|event| IfEvent::not_loopback(event));
+    for event in events {
+        match event.ip {
+            IpAddr::V4(ip4) => v4_ifs.insert(ip4, event.plen.into(), event.ifindex),
+            IpAddr::V6(ip6) => v6_ifs.insert(ip6, event.plen.into(), event.ifindex),
+        };
     }
 }
 
@@ -154,34 +145,72 @@ fn main() {
         exit(1);
     }
 
+    // initialize interface index trees
     let mut v4_ifs = treebitmap::IpLookupTable::new();
     let mut v6_ifs = treebitmap::IpLookupTable::new();
+    index_interface_trees_init(&mut v4_ifs, &mut v6_ifs);
 
-    let events = get_current_events()
-            .into_iter()
-            .filter(|event| IfEvent::not_loopback(event));
-    for event in events {
-        let intf = IfState {
-            if_index: event.ifindex,
-            cache: HashMap::new(),
-        };
-        match event.ip {
-            IpAddr::V4(ip4) => v4_ifs.insert(ip4, event.plen.into(), intf),
-            IpAddr::V6(ip6) => v6_ifs.insert(ip6, event.plen.into(), intf),
-        };
-    }
+    // create crossbeam channels for ServiceEvents
+    let controller = services::ServiceController::new();
+    let v4_channel = controller.originate();
+    let v6_channel = controller.originate();
+    let cache_channel = controller.subscribe();
 
-    // IPv4 listener
+    // create cache receiver for ServiceEvents
+    thread::spawn(move || {
+        // create a services cache per interface index, IPv4 & IPv6 should be merged
+        let mut cache_map: HashMap<u32, HashMap<RecordKey, RecordInfo>> = HashMap::new();
+
+        let recv_iter = cache_channel.iter();
+        for msg in recv_iter {
+            if !cache_map.contains_key(&msg.ifindex) {
+                let table = HashMap::new();
+                cache_map.insert(msg.ifindex, table);
+            }
+            let cache = cache_map.get_mut(&msg.ifindex).unwrap();
+            let when = Instant::now() + Duration::from_secs(msg.ttl.into());
+            let key = RecordKey {
+                name: msg.sname,
+                data: msg.sdata,
+            };
+            let val = RecordInfo {
+                ttl: msg.ttl,
+            };
+
+            let _v = match cache.entry(key.clone()) {
+                Vacant(entry) => {
+                    println!("caching {} + {:?} on ifindex: {}", key.name, key.data, msg.ifindex);
+                    let task = Delay::new(when)
+                        .map_err(|e| panic!("delay errored; err={:?}", e))
+                        .and_then(move |_| {
+                            println!("timeout for {} + {:?}", key.name, key.data);
+                            Ok(())
+                        });
+                        
+                    tokio::spawn(task);
+                    entry.insert(val)
+                },
+                Occupied(exists) => {
+                    println!("found: {} + {:?} on ifindex: {}", key.name, key.data, msg.ifindex);
+                    let mut entry = exists.into_mut();
+                    entry.ttl = msg.ttl;
+                    entry
+                },
+            };
+        }
+    });
+
+    // listen for IPv4 mDNS packets
     let v4_listen_addr = SocketAddr::from(SocketAddrV4::new(IP_ALL.into(), MDNS_PORT));
     
     let v4_std_socket = multicast::join_multicast(&MDNS_IPV4, &v4_listen_addr, 0).expect("mDNS IPv4 join_multicast");
-    let v4_socket = UdpSocket::from_std(v4_std_socket, &tokio::reactor::Handle::current()).unwrap();
+    let v4_socket = UdpSocket::from_std(v4_std_socket, &tokio::reactor::Handle::default()).unwrap();
     let (_v4_writer, v4_reader) = UdpFramed::new(v4_socket, BytesCodec::new()).split();
 
     let v4_socket_read = v4_reader.for_each(move |(msg, addr)| {
-        match intf_for_v4_address(addr, &mut v4_ifs) {
-            Some(ref mut intf) => {
-                match extract_packet(intf, &msg) {
+        match index_for_v4_address(addr, &v4_ifs) {
+            Some(ifindex) => {
+                match extract_packet(ifindex, &msg, &v4_channel) {
                     Ok(()) => {},
                     Err(e) => {
                         eprintln!("Error from {}: {}", addr, e);
@@ -196,15 +225,15 @@ fn main() {
         Ok(())
     });
     
-
+    // listen for IPv6 mDNS packets
     let v6_std_socket = multicast::join_multicast(&MDNS_IPV6, &v4_listen_addr, 0).expect("mDNS IPv6 join_multicast");
-    let v6_socket = UdpSocket::from_std(v6_std_socket, &tokio::reactor::Handle::current()).unwrap();
+    let v6_socket = UdpSocket::from_std(v6_std_socket, &tokio::reactor::Handle::default()).unwrap();
     let (_v6_writer, v6_reader) = UdpFramed::new(v6_socket, BytesCodec::new()).split();
 
     let v6_socket_read = v6_reader.for_each(move |(msg, addr)| {
-        match intf_for_v6_address(addr, &mut v6_ifs) {
-            Some(ref mut intf) => {
-                match extract_packet(intf, &msg) {
+        match index_for_v6_address(addr, &v6_ifs) {
+            Some(ifindex) => {
+                match extract_packet(ifindex, &msg, &v6_channel) {
                     Ok(()) => {},
                     Err(e) => {
                         eprintln!("Error from {}: {}", addr, e);
