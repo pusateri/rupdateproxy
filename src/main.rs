@@ -47,7 +47,7 @@ struct RecordInfo {
 }
 
 // extract the received packet buffer into a Service Event and send on shared channel
-fn extract_packet(ifindex: u32, buf: &[u8], tx: &mpsc::Sender<services::ServiceEvent>) -> Result<(), Box<Error>>
+fn extract_packet(ifindex: u32, buf: &[u8], tx: &mut mpsc::Sender<services::ServiceEvent>) -> Result<(), Box<Error>>
 {
     let msg = Message::from_bytes(Bytes::from(buf)).expect("DNS Message::from_bytes failed");
 
@@ -67,7 +67,7 @@ fn extract_packet(ifindex: u32, buf: &[u8], tx: &mpsc::Sender<services::ServiceE
                 ifindex,
                 record.ttl(),
             );
-            tx.send(se);
+            tx.send(se).wait().unwrap();
         }
     }
     Ok(())
@@ -151,15 +151,13 @@ fn main() {
     index_interface_trees_init(&mut v4_ifs, &mut v6_ifs);
 
     // create crossbeam channels for ServiceEvents
-    let scontroller = services::ServiceController::new();
-    let v4_channel = scontroller.originate();
-    let v6_channel = scontroller.originate();
+    let (tx, rx) = mpsc::channel(1000);
 
     // create cache receiver for ServiceEvents
     // create a services cache per interface index, IPv4 & IPv6 should be merged
     let mut cache_map: HashMap<u32, HashMap<RecordKey, RecordInfo>> = HashMap::new();
 
-    let service_sink = scontroller.receiver.for_each(move |msg| {
+    let service_sink = rx.for_each(move |msg: services::ServiceEvent| {
         if !cache_map.contains_key(&msg.ifindex) {
             let table = HashMap::new();
             cache_map.insert(msg.ifindex, table);
@@ -204,10 +202,11 @@ fn main() {
     let v4_socket = UdpSocket::from_std(v4_std_socket, &tokio::reactor::Handle::default()).unwrap();
     let (_v4_writer, v4_reader) = UdpFramed::new(v4_socket, BytesCodec::new()).split();
 
+    let mut source = tx.clone();
     let v4_socket_read = v4_reader.for_each(move |(msg, addr)| {
         match index_for_v4_address(addr, &v4_ifs) {
             Some(ifindex) => {
-                match extract_packet(ifindex, &msg, &v4_channel) {
+                match extract_packet(ifindex, &msg, &mut source) {
                     Ok(()) => {},
                     Err(e) => {
                         eprintln!("Error from {}: {}", addr, e);
@@ -227,10 +226,11 @@ fn main() {
     let v6_socket = UdpSocket::from_std(v6_std_socket, &tokio::reactor::Handle::default()).unwrap();
     let (_v6_writer, v6_reader) = UdpFramed::new(v6_socket, BytesCodec::new()).split();
 
+    let mut source = tx.clone();
     let v6_socket_read = v6_reader.for_each(move |(msg, addr)| {
         match index_for_v6_address(addr, &v6_ifs) {
             Some(ifindex) => {
-                match extract_packet(ifindex, &msg, &v6_channel) {
+                match extract_packet(ifindex, &msg, &mut source) {
                     Ok(()) => {},
                     Err(e) => {
                         eprintln!("Error from {}: {}", addr, e);
