@@ -2,7 +2,6 @@
 use domain_core::bits::Dname;
 use domain_core::bits::name::ParsedDname;
 use domain_core::rdata::AllRecordData;
-use futures::sync::mpsc;
 
 #[derive(Debug, PartialEq)]
 pub enum ServiceAction {
@@ -38,25 +37,5 @@ impl ServiceEvent {
     }
 }
 
-pub struct ServiceController {
-	pub sender: mpsc::Sender<ServiceEvent>,
-	pub receiver: mpsc::Receiver<ServiceEvent>,
-}
-
-impl ServiceController {
-	pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel(1000);
-		let controller = ServiceController {
-			sender: tx,
-			receiver: rx,
-		};
-		controller
-	}
-
-    /// get a sender channel
-    pub fn originate(&self) -> mpsc::Sender<ServiceEvent> {
-        self.sender.clone()
-    }
-}
 
 

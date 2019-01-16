@@ -6,10 +6,10 @@ homepage = "https://github.com/pusateri/rupdateproxy"
 edition = "2018"
 
 [dependencies]
-futures = "*"
+futures = "^0.1"
 tokio = "^0.1"
-tokio-codec = "*"
-tokio-timer = "*"
+tokio-codec = "^0.1"
+tokio-timer = "^0.2"
 lazy_static = "^1.0"
 bytes = "^0.4"
 socket2 = { version = "0.3.7", features = ["reuseport"] }
@@ -17,13 +17,10 @@ domain-core = { git = "https://github.com/NLnetLabs/domain-core.git" }
 domain-resolv = { git = "https://github.com/NLnetLabs/domain-core.git" }
 nix = { git = "https://github.com/pusateri/nix.git" }
 interface-events = { git = "https://github.com/pusateri/interface-events.git" }
-hostname ="*"
-treebitmap = { git = "https://github.com/zesplot/treebitmap.git", branch = "longest_match_mut" }
-jsonpath = "*"
-json-patch = "*"
-shrust = "*"
-argparse = "0.2.2"
-daemonize = "0.3.0"
+hostname ="^0.1"
+treebitmap = "^0.3"
+argparse = "^0.2"
+daemonize = "^0.3"
 
 [build-dependencies]
-git-version = "*"
+git-version = "^0.2"
