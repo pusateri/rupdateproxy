@@ -4,9 +4,9 @@ use std::net::{Ipv4Addr, Ipv6Addr, IpAddr, SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::thread;
 use std::process::exit;
 use tokio::prelude::*;
+use tokio::runtime::Runtime;
 use tokio::net::{UdpSocket, UdpFramed};
 use tokio_codec::BytesCodec;
 use tokio::timer::Delay;
@@ -18,7 +18,7 @@ use domain_core::rdata::AllRecordData;
 use lazy_static::lazy_static;
 use treebitmap;
 use interface_events::{get_current_events, IfEvent};
-use crossbeam_channel::Sender;
+use futures::sync::mpsc;
 use crate::services::{ServiceEvent, ServiceAction};
 
 
@@ -47,7 +47,7 @@ struct RecordInfo {
 }
 
 // extract the received packet buffer into a Service Event and send on shared channel
-fn extract_packet(ifindex: u32, buf: &[u8], tx: &Sender<services::ServiceEvent>) -> Result<(), Box<Error>>
+fn extract_packet(ifindex: u32, buf: &[u8], tx: &mpsc::Sender<services::ServiceEvent>) -> Result<(), Box<Error>>
 {
     let msg = Message::from_bytes(Bytes::from(buf)).expect("DNS Message::from_bytes failed");
 
@@ -67,7 +67,7 @@ fn extract_packet(ifindex: u32, buf: &[u8], tx: &Sender<services::ServiceEvent>)
                 ifindex,
                 record.ttl(),
             );
-            tx.send(se).expect("Send ServiceEvent");
+            tx.send(se);
         }
     }
     Ok(())
@@ -151,53 +151,50 @@ fn main() {
     index_interface_trees_init(&mut v4_ifs, &mut v6_ifs);
 
     // create crossbeam channels for ServiceEvents
-    let controller = services::ServiceController::new();
-    let v4_channel = controller.originate();
-    let v6_channel = controller.originate();
-    let cache_channel = controller.subscribe();
+    let scontroller = services::ServiceController::new();
+    let v4_channel = scontroller.originate();
+    let v6_channel = scontroller.originate();
 
     // create cache receiver for ServiceEvents
-    thread::spawn(move || {
-        // create a services cache per interface index, IPv4 & IPv6 should be merged
-        let mut cache_map: HashMap<u32, HashMap<RecordKey, RecordInfo>> = HashMap::new();
+    // create a services cache per interface index, IPv4 & IPv6 should be merged
+    let mut cache_map: HashMap<u32, HashMap<RecordKey, RecordInfo>> = HashMap::new();
 
-        let recv_iter = cache_channel.iter();
-        for msg in recv_iter {
-            if !cache_map.contains_key(&msg.ifindex) {
-                let table = HashMap::new();
-                cache_map.insert(msg.ifindex, table);
-            }
-            let cache = cache_map.get_mut(&msg.ifindex).unwrap();
-            let when = Instant::now() + Duration::from_secs(msg.ttl.into());
-            let key = RecordKey {
-                name: msg.sname,
-                data: msg.sdata,
-            };
-            let val = RecordInfo {
-                ttl: msg.ttl,
-            };
-
-            let _v = match cache.entry(key.clone()) {
-                Vacant(entry) => {
-                    println!("caching {} + {:?} on ifindex: {}", key.name, key.data, msg.ifindex);
-                    let task = Delay::new(when)
-                        .map_err(|e| panic!("delay errored; err={:?}", e))
-                        .and_then(move |_| {
-                            println!("timeout for {} + {:?}", key.name, key.data);
-                            Ok(())
-                        });
-                        
-                    tokio::spawn(task);
-                    entry.insert(val)
-                },
-                Occupied(exists) => {
-                    println!("found: {} + {:?} on ifindex: {}", key.name, key.data, msg.ifindex);
-                    let mut entry = exists.into_mut();
-                    entry.ttl = msg.ttl;
-                    entry
-                },
-            };
+    let service_sink = scontroller.receiver.for_each(move |msg| {
+        if !cache_map.contains_key(&msg.ifindex) {
+            let table = HashMap::new();
+            cache_map.insert(msg.ifindex, table);
         }
+        let cache = cache_map.get_mut(&msg.ifindex).unwrap();
+        let when = Instant::now() + Duration::from_secs(msg.ttl.into());
+        let key = RecordKey {
+            name: msg.sname,
+            data: msg.sdata,
+        };
+        let val = RecordInfo {
+            ttl: msg.ttl,
+        };
+
+        let _v = match cache.entry(key.clone()) {
+            Vacant(entry) => {
+                println!("caching {} + {:?} on ifindex: {}", key.name, key.data, msg.ifindex);
+                let task = Delay::new(when)
+                    .map_err(|e| panic!("delay errored; err={:?}", e))
+                    .and_then(move |_| {
+                        println!("timeout for {} + {:?}", key.name, key.data);
+                        Ok(())
+                    });
+                    
+                tokio::spawn(task);
+                entry.insert(val)
+            },
+            Occupied(exists) => {
+                println!("found: {} + {:?} on ifindex: {}", key.name, key.data, msg.ifindex);
+                let mut entry = exists.into_mut();
+                entry.ttl = msg.ttl;
+                entry
+            },
+        };
+        Ok(())
     });
 
     // listen for IPv4 mDNS packets
@@ -226,7 +223,7 @@ fn main() {
     });
     
     // listen for IPv6 mDNS packets
-    let v6_std_socket = multicast::join_multicast(&MDNS_IPV6, &v4_listen_addr, 0).expect("mDNS IPv6 join_multicast");
+    let v6_std_socket = multicast::join_multicast(&MDNS_IPV6, &v4_listen_addr, 11).expect("mDNS IPv6 join_multicast");
     let v6_socket = UdpSocket::from_std(v6_std_socket, &tokio::reactor::Handle::default()).unwrap();
     let (_v6_writer, v6_reader) = UdpFramed::new(v6_socket, BytesCodec::new()).split();
 
@@ -248,9 +245,14 @@ fn main() {
         Ok(())
     });
 
-    tokio::run({
-        v4_socket_read.join(v6_socket_read)
-                      .map(|_| ())
-                      .map_err(|e| println!("error = {:?}", e))
-    });
+    let mut rt = Runtime::new().unwrap();
+
+    // Spawn the server task
+    rt.spawn(v4_socket_read.map(|_| ()).map_err(|_| eprintln!("v4_socket_read")));
+    rt.spawn(v6_socket_read.map(|_| ()).map_err(|_| eprintln!("v6_socket_read")));
+    rt.spawn(service_sink);
+
+    // Wait until the runtime becomes idle and shut it down.
+    rt.shutdown_on_idle()
+        .wait().unwrap();
 }

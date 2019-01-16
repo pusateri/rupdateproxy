@@ -2,7 +2,7 @@
 use domain_core::bits::Dname;
 use domain_core::bits::name::ParsedDname;
 use domain_core::rdata::AllRecordData;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use futures::sync::mpsc;
 
 #[derive(Debug, PartialEq)]
 pub enum ServiceAction {
@@ -38,34 +38,23 @@ impl ServiceEvent {
     }
 }
 
-#[derive(Clone)]
 pub struct ServiceController {
-	sender: Sender<ServiceEvent>,
-	receiver: Receiver<ServiceEvent>,
+	pub sender: mpsc::Sender<ServiceEvent>,
+	pub receiver: mpsc::Receiver<ServiceEvent>,
 }
 
 impl ServiceController {
 	pub fn new() -> Self {
-		let (s, r) = unbounded::<ServiceEvent>();
+        let (tx, rx) = mpsc::channel(1000);
 		let controller = ServiceController {
-			sender: s,
-			receiver: r,
+			sender: tx,
+			receiver: rx,
 		};
 		controller
 	}
 
-	/// subscribe to future service events
-	pub fn subscribe(&self) -> Receiver<ServiceEvent> {
-		self.receiver.clone()
-	}
-
-	/// unsubscribe to future service events
-	pub fn unsubscribe(&self, r: Receiver<ServiceEvent>) {
-		drop(r);
-	}
-
     /// get a sender channel
-    pub fn originate(&self) -> Sender<ServiceEvent> {
+    pub fn originate(&self) -> mpsc::Sender<ServiceEvent> {
         self.sender.clone()
     }
 }
