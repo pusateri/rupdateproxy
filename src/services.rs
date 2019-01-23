@@ -1,6 +1,5 @@
-
-use domain_core::bits::Dname;
 use domain_core::bits::name::ParsedDname;
+use domain_core::bits::Dname;
 use domain_core::rdata::AllRecordData;
 
 #[derive(Debug, PartialEq)]
@@ -36,6 +35,3 @@ impl ServiceEvent {
         }
     }
 }
-
-
-
