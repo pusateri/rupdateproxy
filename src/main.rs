@@ -3,6 +3,7 @@ use bytes::Bytes;
 use domain_core::bits::message::Message;
 use domain_core::bits::name::{ParsedDname, ToDname};
 use domain_core::bits::Dname;
+use domain_core::bits::record::Record;
 use domain_core::rdata::AllRecordData;
 use futures::sync::mpsc;
 use interface_events::{get_current_events, IfEvent};
@@ -44,9 +45,73 @@ struct RecordInfo {
     ttl: u32,
 }
 
+fn extract_mdns_record(ifindex: u32, from: SocketAddr, record: Record<ParsedDname, AllRecordData<ParsedDname>>) -> Option<ServiceEvent>
+{
+    match record.data() {
+        AllRecordData::A(addr) =>
+            Some(ServiceEvent::new_a(
+                ServiceAction::DYNAMIC,
+                record.owner().to_name(),
+                record.data().clone(),
+                ifindex,
+                from,
+                addr,
+                record.ttl(),
+            )),
+        AllRecordData::Aaaa(addr) =>
+            Some(ServiceEvent::new_aaaa(
+                ServiceAction::DYNAMIC,
+                record.owner().to_name(),
+                record.data().clone(),
+                ifindex,
+                from,
+                addr,
+                record.ttl(),
+            )),
+        AllRecordData::Ptr(name) =>
+            Some(ServiceEvent::new_ptr(
+                ServiceAction::DYNAMIC,
+                record.owner().to_name(),
+                record.data().clone(),
+                ifindex,
+                from,
+                name,
+                record.ttl(),
+            )),
+        AllRecordData::Srv(srv) =>
+            Some(ServiceEvent::new_srv(
+                ServiceAction::DYNAMIC,
+                record.owner().to_name(),
+                record.data().clone(),
+                ifindex,
+                from,
+                srv.priority(),
+                srv.weight(),
+                srv.port(),
+                srv.target(),
+                record.ttl(),
+            )),
+        AllRecordData::Txt(txt) =>
+            Some(ServiceEvent::new_txt(
+                ServiceAction::DYNAMIC,
+                record.owner().to_name(),
+                record.data().clone(),
+                ifindex,
+                from,
+                txt.text(),
+                record.ttl(),
+            )),
+        _ => {
+            println!("        not one of above: {}", record.rtype());
+            return None;
+        },
+    }
+}
+
 // extract the received packet buffer into a Service Event and send on shared channel
-fn extract_packet(
+fn extract_mdns_response(
     ifindex: u32,
+    from: SocketAddr,
     buf: &[u8],
     tx: &mut mpsc::Sender<services::ServiceEvent>,
 ) -> Result<(), Box<Error>> {
@@ -59,20 +124,20 @@ fn extract_packet(
         return Ok(());
     }
 
-    for record in msg
-        .answer()
-        .unwrap()
-        .limit_to::<AllRecordData<ParsedDname>>()
-    {
-        if let Ok(record) = record {
-            let se = ServiceEvent::new(
-                ServiceAction::DYNAMIC,
-                record.owner().to_name(),
-                record.data().clone(),
-                ifindex,
-                record.ttl(),
-            );
-            tx.send(se).wait().unwrap();
+    for section in vec![msg.answer(), msg.additional()] {
+        for record in section
+            .unwrap()
+            .limit_to::<AllRecordData<ParsedDname>>()
+        {
+            match record {
+                Ok(r) => {
+                    let se = extract_mdns_record(ifindex, from, r);
+                    if let Some(event) = se {
+                        tx.send(event).wait().unwrap();
+                    }
+                },
+                Err(_e) => (),
+            }
         }
     }
     Ok(())
@@ -217,7 +282,7 @@ fn main() {
     let mut source = tx.clone();
     let v4_socket_read = v4_reader.for_each(move |(msg, addr)| {
         match index_for_v4_address(addr, &v4_ifs) {
-            Some(ifindex) => match extract_packet(ifindex, &msg, &mut source) {
+            Some(ifindex) => match extract_mdns_response(ifindex, addr, &msg, &mut source) {
                 Ok(()) => {}
                 Err(e) => {
                     eprintln!("Error from {}: {}", addr, e);
@@ -240,7 +305,7 @@ fn main() {
     let mut source = tx.clone();
     let v6_socket_read = v6_reader.for_each(move |(msg, addr)| {
         match index_for_v6_address(addr, &v6_ifs) {
-            Some(ifindex) => match extract_packet(ifindex, &msg, &mut source) {
+            Some(ifindex) => match extract_mdns_response(ifindex, addr, &msg, &mut source) {
                 Ok(()) => {}
                 Err(e) => {
                     eprintln!("Error from {}: {}", addr, e);
