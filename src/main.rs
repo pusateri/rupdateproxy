@@ -8,6 +8,7 @@ use domain_core::rdata::AllRecordData;
 use futures::sync::mpsc;
 use interface_events::{get_current_events, IfEvent};
 use lazy_static::lazy_static;
+use std::fmt;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::error::Error;
@@ -45,7 +46,14 @@ struct RecordInfo {
     ttl: u32,
 }
 
-fn extract_mdns_record(ifindex: u32, from: SocketAddr, record: Record<ParsedDname, AllRecordData<ParsedDname>>) -> Option<ServiceEvent>
+
+#[derive(Clone, Debug, PartialEq)]
+struct IfState {
+    ifindex: u32,
+    subdomain: String,
+}
+
+fn extract_mdns_record(ifindex: u32, subdomain: &String, from: SocketAddr, record: Record<ParsedDname, AllRecordData<ParsedDname>>) -> Option<ServiceEvent>
 {
     match record.data() {
         AllRecordData::A(addr) =>
@@ -54,6 +62,7 @@ fn extract_mdns_record(ifindex: u32, from: SocketAddr, record: Record<ParsedDnam
                 record.owner().to_name(),
                 record.data().clone(),
                 ifindex,
+                subdomain,
                 from,
                 addr,
                 record.ttl(),
@@ -64,6 +73,7 @@ fn extract_mdns_record(ifindex: u32, from: SocketAddr, record: Record<ParsedDnam
                 record.owner().to_name(),
                 record.data().clone(),
                 ifindex,
+                subdomain,
                 from,
                 addr,
                 record.ttl(),
@@ -74,6 +84,7 @@ fn extract_mdns_record(ifindex: u32, from: SocketAddr, record: Record<ParsedDnam
                 record.owner().to_name(),
                 record.data().clone(),
                 ifindex,
+                subdomain,
                 from,
                 name,
                 record.ttl(),
@@ -84,6 +95,7 @@ fn extract_mdns_record(ifindex: u32, from: SocketAddr, record: Record<ParsedDnam
                 record.owner().to_name(),
                 record.data().clone(),
                 ifindex,
+                subdomain,
                 from,
                 srv.priority(),
                 srv.weight(),
@@ -97,6 +109,7 @@ fn extract_mdns_record(ifindex: u32, from: SocketAddr, record: Record<ParsedDnam
                 record.owner().to_name(),
                 record.data().clone(),
                 ifindex,
+                subdomain,
                 from,
                 txt.text(),
                 record.ttl(),
@@ -111,6 +124,7 @@ fn extract_mdns_record(ifindex: u32, from: SocketAddr, record: Record<ParsedDnam
 // extract the received packet buffer into a Service Event and send on shared channel
 fn extract_mdns_response(
     ifindex: u32,
+    subdomain: &String,
     from: SocketAddr,
     buf: &[u8],
     tx: &mut mpsc::Sender<services::ServiceEvent>,
@@ -131,7 +145,7 @@ fn extract_mdns_response(
         {
             match record {
                 Ok(r) => {
-                    let se = extract_mdns_record(ifindex, from, r);
+                    let se = extract_mdns_record(ifindex, subdomain, from, r);
                     if let Some(event) = se {
                         tx.send(event).wait().unwrap();
                     }
@@ -145,13 +159,13 @@ fn extract_mdns_response(
 
 fn index_for_v4_address(
     sockaddr: SocketAddr,
-    ifs: &treebitmap::IpLookupTable<Ipv4Addr, u32>,
-) -> Option<u32> {
+    ifs: &treebitmap::IpLookupTable<Ipv4Addr, IfState>,
+) -> Option<&IfState> {
     match sockaddr {
         SocketAddr::V4(sockaddr_v4) => {
             let prefix_opt = ifs.longest_match(*sockaddr_v4.ip());
             match prefix_opt {
-                Some((_addr, _plen, ifindex)) => Some(*ifindex),
+                Some((_addr, _plen, ifstate)) => Some(ifstate),
                 None => None,
             }
         }
@@ -161,13 +175,13 @@ fn index_for_v4_address(
 
 fn index_for_v6_address(
     sockaddr: SocketAddr,
-    ifs: &treebitmap::IpLookupTable<Ipv6Addr, u32>,
-) -> Option<u32> {
+    ifs: &treebitmap::IpLookupTable<Ipv6Addr, IfState>,
+) -> Option<&IfState> {
     match sockaddr {
         SocketAddr::V6(sockaddr_v6) => {
             let prefix_opt = ifs.longest_match(*sockaddr_v6.ip());
             match prefix_opt {
-                Some((_addr, _plen, ifindex)) => Some(*ifindex),
+                Some((_addr, _plen, ifstate)) => Some(ifstate),
                 None => None,
             }
         }
@@ -176,8 +190,8 @@ fn index_for_v6_address(
 }
 
 fn index_interface_trees_init(
-    v4_ifs: &mut treebitmap::IpLookupTable<std::net::Ipv4Addr, u32>,
-    v6_ifs: &mut treebitmap::IpLookupTable<std::net::Ipv6Addr, u32>,
+    v4_ifs: &mut treebitmap::IpLookupTable<std::net::Ipv4Addr, IfState>,
+    v6_ifs: &mut treebitmap::IpLookupTable<std::net::Ipv6Addr, IfState>,
 ) {
     // lookup ifindex by source IP address until we have IN_PKTINFO/RECV_IF
 
@@ -185,9 +199,29 @@ fn index_interface_trees_init(
         .into_iter()
         .filter(|event| IfEvent::not_loopback(event));
     for event in events {
-        match event.ip {
-            IpAddr::V4(ip4) => v4_ifs.insert(ip4, event.plen.into(), event.ifindex),
-            IpAddr::V6(ip6) => v6_ifs.insert(ip6, event.plen.into(), event.ifindex),
+        match event.ipnet {
+            IpAddr::V4(ip4) => {
+                for byte in &ip4.octets() {
+                    dbg!(byte);
+                }
+                let ifs = IfState {
+                    ifindex: event.ifindex,
+                    subdomain: ip4.octets().into_iter().map(|d| format!("{:02x}", d)).collect(),
+                };
+                v4_ifs.insert(ip4, event.plen.into(), ifs);
+            },
+            IpAddr::V6(ip6) => {
+                let mut len: u8 = event.plen / 8;
+                if event.plen % 8 > 0 {
+                    len += 1;
+                }
+                let v6net: String = ip6.octets().into_iter().take(len as usize).map(|d| format!("{:02x}", d)).collect();
+                let ifs = IfState {
+                    ifindex: event.ifindex,
+                    subdomain: v6net,
+                };
+                v6_ifs.insert(ip6, event.plen.into(), ifs);
+            },
         };
     }
 }
@@ -245,8 +279,8 @@ fn main() {
         let _v = match cache.entry(key.clone()) {
             Vacant(entry) => {
                 println!(
-                    "caching {} + {:?} on ifindex: {}",
-                    key.name, key.data, msg.ifindex
+                    "caching {} + {:?} on ifindex: {}, subdomain: {}",
+                    key.name, key.data, msg.ifindex, msg.subdomain,
                 );
                 let task = Delay::new(when)
                     .map_err(|e| panic!("delay errored; err={:?}", e))
@@ -260,8 +294,8 @@ fn main() {
             }
             Occupied(exists) => {
                 println!(
-                    "found: {} + {:?} on ifindex: {}",
-                    key.name, key.data, msg.ifindex
+                    "found: {} + {:?} on ifindex: {}, subdomain {}",
+                    key.name, key.data, msg.ifindex, msg.subdomain,
                 );
                 let mut entry = exists.into_mut();
                 entry.ttl = msg.ttl;
@@ -282,7 +316,7 @@ fn main() {
     let mut source = tx.clone();
     let v4_socket_read = v4_reader.for_each(move |(msg, addr)| {
         match index_for_v4_address(addr, &v4_ifs) {
-            Some(ifindex) => match extract_mdns_response(ifindex, addr, &msg, &mut source) {
+            Some(ifs) => match extract_mdns_response(ifs.ifindex, &ifs.subdomain, addr, &msg, &mut source) {
                 Ok(()) => {}
                 Err(e) => {
                     eprintln!("Error from {}: {}", addr, e);
@@ -297,7 +331,7 @@ fn main() {
     });
 
     // listen for IPv6 mDNS packets
-    let v6_std_socket = multicast::join_multicast(&MDNS_IPV6, &v4_listen_addr, 11)
+    let v6_std_socket = multicast::join_multicast(&MDNS_IPV6, &v4_listen_addr, 7)
         .expect("mDNS IPv6 join_multicast");
     let v6_socket = UdpSocket::from_std(v6_std_socket, &tokio::reactor::Handle::default()).unwrap();
     let (_v6_writer, v6_reader) = UdpFramed::new(v6_socket, BytesCodec::new()).split();
@@ -305,7 +339,7 @@ fn main() {
     let mut source = tx.clone();
     let v6_socket_read = v6_reader.for_each(move |(msg, addr)| {
         match index_for_v6_address(addr, &v6_ifs) {
-            Some(ifindex) => match extract_mdns_response(ifindex, addr, &msg, &mut source) {
+            Some(ifs) => match extract_mdns_response(ifs.ifindex, &ifs.subdomain, addr, &msg, &mut source) {
                 Ok(()) => {}
                 Err(e) => {
                     eprintln!("Error from {}: {}", addr, e);
