@@ -8,7 +8,6 @@ use domain_core::rdata::AllRecordData;
 use futures::sync::mpsc;
 use interface_events::{get_current_events, IfEvent};
 use lazy_static::lazy_static;
-use std::fmt;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::error::Error;
@@ -114,6 +113,17 @@ fn extract_mdns_record(ifindex: u32, subdomain: &String, from: SocketAddr, recor
                 txt.text(),
                 record.ttl(),
             )),
+        AllRecordData::Opt(opt) =>
+            Some(ServiceEvent::new_opt(
+                ServiceAction::DYNAMIC,
+                record.owner().to_name(),
+                record.data().clone(),
+                ifindex,
+                subdomain,
+                from,
+                opt.clone(),
+                record.ttl(),
+            )),
         _ => {
             println!("        not one of above: {}", record.rtype());
             return None;
@@ -201,9 +211,6 @@ fn index_interface_trees_init(
     for event in events {
         match event.ipnet {
             IpAddr::V4(ip4) => {
-                for byte in &ip4.octets() {
-                    dbg!(byte);
-                }
                 let ifs = IfState {
                     ifindex: event.ifindex,
                     subdomain: ip4.octets().into_iter().map(|d| format!("{:02x}", d)).collect(),
@@ -224,6 +231,10 @@ fn index_interface_trees_init(
             },
         };
     }
+}
+fn send_update(msg: &services::ServiceEvent)
+{
+    println!("sending msg: {}", msg.sname);
 }
 
 fn main() {
@@ -270,13 +281,14 @@ fn main() {
         }
         let cache = cache_map.get_mut(&msg.ifindex).unwrap();
         let when = Instant::now() + Duration::from_secs(msg.ttl.into());
+
         let key = RecordKey {
-            name: msg.sname,
-            data: msg.sdata,
+            name: msg.sname.clone(),
+            data: msg.sdata.clone(),
         };
         let val = RecordInfo { ttl: msg.ttl };
 
-        let _v = match cache.entry(key.clone()) {
+        match cache.entry(key.clone()) {
             Vacant(entry) => {
                 println!(
                     "caching {} + {:?} on ifindex: {}, subdomain: {}",
@@ -290,7 +302,10 @@ fn main() {
                     });
 
                 tokio::spawn(task);
-                entry.insert(val)
+                entry.insert(val);
+
+                // send new cache entries to DNS Update server.
+                send_update(&msg);
             }
             Occupied(exists) => {
                 println!(
@@ -299,7 +314,6 @@ fn main() {
                 );
                 let mut entry = exists.into_mut();
                 entry.ttl = msg.ttl;
-                entry
             }
         };
         Ok(())
@@ -331,7 +345,7 @@ fn main() {
     });
 
     // listen for IPv6 mDNS packets
-    let v6_std_socket = multicast::join_multicast(&MDNS_IPV6, &v4_listen_addr, 7)
+    let v6_std_socket = multicast::join_multicast(&MDNS_IPV6, &v4_listen_addr, 10)
         .expect("mDNS IPv6 join_multicast");
     let v6_socket = UdpSocket::from_std(v6_std_socket, &tokio::reactor::Handle::default()).unwrap();
     let (_v6_writer, v6_reader) = UdpFramed::new(v6_socket, BytesCodec::new()).split();

@@ -1,6 +1,8 @@
+
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use bytes::Bytes;
 use domain_core::bits::name::ParsedDname;
+use domain_core::bits::opt::Opt;
 use domain_core::bits::Dname;
 use domain_core::rdata::AllRecordData;
 
@@ -11,7 +13,7 @@ pub enum ServiceAction {
     FILTER,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct ServiceEvent {
     pub saction: ServiceAction,
     pub sname: Dname,
@@ -27,6 +29,7 @@ pub struct ServiceEvent {
     pub port: u16,
     pub target: Option<ParsedDname>,
     pub txt: Option<Bytes>,
+    pub opt: Option<Opt>,
     pub ttl: u32,
 }
 
@@ -56,6 +59,7 @@ impl ServiceEvent {
             port: 0,
             target: None,
             txt: None,
+            opt: None,
             ttl: ttl,
         }
     }
@@ -84,6 +88,7 @@ impl ServiceEvent {
             port: 0,
             target: None,
             txt: None,
+            opt: None,
             ttl: ttl,
         }
     }
@@ -112,6 +117,7 @@ impl ServiceEvent {
             port: 0,
             target: None,
             txt: None,
+            opt: None,
             ttl: ttl,
         }
     }
@@ -143,6 +149,7 @@ impl ServiceEvent {
             port: port,
             target: Some(target.clone()),
             txt: None,
+            opt: None,
             ttl: ttl,
         }
     }
@@ -171,6 +178,36 @@ impl ServiceEvent {
             port: 0,
             target: None,
             txt: Some(txt),
+            opt: None,
+            ttl: ttl,
+        }
+    }
+    pub fn new_opt(
+        action: ServiceAction,
+        dname: Dname,
+        data: AllRecordData<ParsedDname>,
+        idx: u32,
+        sub: &String,
+        from: SocketAddr,
+        opt: Opt,
+        ttl: u32,
+    ) -> ServiceEvent {
+        ServiceEvent {
+            saction: action,
+            sname: dname,
+            sdata: data,
+            ifindex: idx,
+            subdomain: sub.to_string(),
+            from: from,
+            ip4: None,
+            ip6: None,
+            ptr: None,
+            priority: 0,
+            weight: 0,
+            port: 0,
+            target: None,
+            txt: None,
+            opt: Some(opt),
             ttl: ttl,
         }
     }
