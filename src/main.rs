@@ -207,6 +207,7 @@ fn index_interface_trees_init(
 
     let events = get_current_events()
         .into_iter()
+        .filter(|event| IfEvent::not_link_local(event))
         .filter(|event| IfEvent::not_loopback(event));
     for event in events {
         match event.ipnet {
@@ -267,7 +268,7 @@ fn main() {
     let mut v6_ifs = treebitmap::IpLookupTable::new();
     index_interface_trees_init(&mut v4_ifs, &mut v6_ifs);
 
-    // create crossbeam channels for ServiceEvents
+    // create channel for ServiceEvents
     let (tx, rx) = mpsc::channel(1000);
 
     // create cache receiver for ServiceEvents
@@ -321,65 +322,88 @@ fn main() {
 
     // listen for IPv4 mDNS packets
     let v4_listen_addr = SocketAddr::from(SocketAddrV4::new(IP_ALL.into(), MDNS_PORT));
+    let v4_socket_read =
+        if v4_ifs.len() > 0 {
+            let v4_std_socket = multicast::join_multicast(&MDNS_IPV4, &v4_listen_addr, 0)
+                .expect("mDNS IPv4 join_multicast");
+            let v4_socket = UdpSocket::from_std(v4_std_socket, &tokio::reactor::Handle::default()).unwrap();
+            let (_v4_writer, v4_reader) = UdpFramed::new(v4_socket, BytesCodec::new()).split();
 
-    let v4_std_socket = multicast::join_multicast(&MDNS_IPV4, &v4_listen_addr, 0)
-        .expect("mDNS IPv4 join_multicast");
-    let v4_socket = UdpSocket::from_std(v4_std_socket, &tokio::reactor::Handle::default()).unwrap();
-    let (_v4_writer, v4_reader) = UdpFramed::new(v4_socket, BytesCodec::new()).split();
+            let mut source = tx.clone();
+            Some(v4_reader.for_each(move |(msg, addr)| {
+                match index_for_v4_address(addr, &v4_ifs) {
+                    Some(ifs) => match extract_mdns_response(ifs.ifindex, &ifs.subdomain, addr, &msg, &mut source) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            eprintln!("Error from {}: {}", addr, e);
+                        }
+                    },
+                    None => {
+                        eprintln!("No interface for addr {:?}", addr);
+                    }
+                };
 
-    let mut source = tx.clone();
-    let v4_socket_read = v4_reader.for_each(move |(msg, addr)| {
-        match index_for_v4_address(addr, &v4_ifs) {
-            Some(ifs) => match extract_mdns_response(ifs.ifindex, &ifs.subdomain, addr, &msg, &mut source) {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("Error from {}: {}", addr, e);
-                }
-            },
-            None => {
-                eprintln!("No interface for addr {:?}", addr);
-            }
+                Ok(())
+            }))
+        } else {
+            None
         };
-
-        Ok(())
-    });
 
     // listen for IPv6 mDNS packets
-    let v6_std_socket = multicast::join_multicast(&MDNS_IPV6, &v4_listen_addr, 10)
-        .expect("mDNS IPv6 join_multicast");
-    let v6_socket = UdpSocket::from_std(v6_std_socket, &tokio::reactor::Handle::default()).unwrap();
-    let (_v6_writer, v6_reader) = UdpFramed::new(v6_socket, BytesCodec::new()).split();
+    let v6_socket_read =
+        if v6_ifs.len() > 0 {
+            let v6_std_socket = multicast::join_multicast(&MDNS_IPV6, &v4_listen_addr, 0)
+                .expect("mDNS IPv6 join_multicast");
+            let v6_socket = UdpSocket::from_std(v6_std_socket, &tokio::reactor::Handle::default()).unwrap();
+            let (_v6_writer, v6_reader) = UdpFramed::new(v6_socket, BytesCodec::new()).split();
+            let mut source = tx.clone();
 
-    let mut source = tx.clone();
-    let v6_socket_read = v6_reader.for_each(move |(msg, addr)| {
-        match index_for_v6_address(addr, &v6_ifs) {
-            Some(ifs) => match extract_mdns_response(ifs.ifindex, &ifs.subdomain, addr, &msg, &mut source) {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("Error from {}: {}", addr, e);
-                }
-            },
-            None => {
-                eprintln!("No interface for addr {:?}", addr);
-            }
+            Some(v6_reader.for_each(move |(msg, addr)| {
+                match index_for_v6_address(addr, &v6_ifs) {
+                    Some(ifs) => match extract_mdns_response(ifs.ifindex, &ifs.subdomain, addr, &msg, &mut source) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            eprintln!("Error from {}: {}", addr, e);
+                        }
+                    },
+                    None => {
+                        eprintln!("No interface for addr {:?}", addr);
+                    }
+                };
+
+                Ok(())
+            }))
+        } else {
+            None
         };
-
-        Ok(())
-    });
 
     let mut rt = Runtime::new().unwrap();
 
-    // Spawn the server task
-    rt.spawn(
-        v4_socket_read
-            .map(|_| ())
-            .map_err(|_| eprintln!("v4_socket_read")),
-    );
-    rt.spawn(
-        v6_socket_read
-            .map(|_| ())
-            .map_err(|_| eprintln!("v6_socket_read")),
-    );
+    // Spawn the server tasks
+    if options.nofour == false {
+        if let Some(reader) = v4_socket_read {
+            rt.spawn(
+                reader
+                    .map(|_| ())
+                    .map_err(|_| eprintln!("v4_socket_read")),
+            );
+        } else {
+            eprintln!("IPv4 is enabled but no addresses are usable");
+        }
+    }
+
+    if options.nosix == false {
+        if let Some(reader) = v6_socket_read {
+            rt.spawn(
+                reader
+                    .map(|_| ())
+                    .map_err(|_| eprintln!("v6_socket_read")),
+            );
+        } else {
+            eprintln!("IPv6 is enabled but no addresses are usable");
+        }
+    }
+    
     rt.spawn(service_sink);
 
     // Wait until the runtime becomes idle and shut it down.
