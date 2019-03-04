@@ -5,6 +5,7 @@ use domain_core::bits::name::{ParsedDname, ToDname};
 use domain_core::bits::Dname;
 use domain_core::bits::record::Record;
 use domain_core::rdata::AllRecordData;
+use domain_resolv::StubResolver;
 use futures::sync::mpsc;
 use interface_events::{get_current_events, IfEvent};
 use lazy_static::lazy_static;
@@ -24,6 +25,7 @@ use treebitmap;
 mod args;
 mod multicast;
 mod services;
+mod update;
 
 const IP_ALL: [u8; 4] = [0, 0, 0, 0];
 pub const MDNS_PORT: u16 = 5353;
@@ -45,11 +47,17 @@ struct RecordInfo {
     ttl: u32,
 }
 
+#[derive(Debug)]
+struct UpdateServer {
+    sa: SocketAddr,
+    socket: Option<UdpSocket>,
+}
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 struct IfState {
     ifindex: u32,
     subdomain: String,
+    userver: Option<UpdateServer>,
 }
 
 fn extract_mdns_record(ifindex: u32, subdomain: &String, from: SocketAddr, record: Record<ParsedDname, AllRecordData<ParsedDname>>) -> Option<ServiceEvent>
@@ -167,7 +175,7 @@ fn extract_mdns_response(
     Ok(())
 }
 
-fn index_for_v4_address(
+fn ifstate_for_v4_address(
     sockaddr: SocketAddr,
     ifs: &treebitmap::IpLookupTable<Ipv4Addr, IfState>,
 ) -> Option<&IfState> {
@@ -183,7 +191,7 @@ fn index_for_v4_address(
     }
 }
 
-fn index_for_v6_address(
+fn ifstate_for_v6_address(
     sockaddr: SocketAddr,
     ifs: &treebitmap::IpLookupTable<Ipv6Addr, IfState>,
 ) -> Option<&IfState> {
@@ -199,7 +207,8 @@ fn index_for_v6_address(
     }
 }
 
-fn index_interface_trees_init(
+fn interface_trees_init(
+    domain: String,
     v4_ifs: &mut treebitmap::IpLookupTable<std::net::Ipv4Addr, IfState>,
     v6_ifs: &mut treebitmap::IpLookupTable<std::net::Ipv6Addr, IfState>,
 ) {
@@ -212,9 +221,13 @@ fn index_interface_trees_init(
     for event in events {
         match event.ipnet {
             IpAddr::V4(ip4) => {
+                let label: String = ip4.octets().into_iter().map(|d| format!("{:02x}", d)).collect();
+                let subdomain = format!("{}.{}", label, domain);
+                //update::resolve_server()
                 let ifs = IfState {
                     ifindex: event.ifindex,
-                    subdomain: ip4.octets().into_iter().map(|d| format!("{:02x}", d)).collect(),
+                    subdomain: subdomain,
+                    userver: None,
                 };
                 v4_ifs.insert(ip4, event.plen.into(), ifs);
             },
@@ -223,19 +236,61 @@ fn index_interface_trees_init(
                 if event.plen % 8 > 0 {
                     len += 1;
                 }
-                let v6net: String = ip6.octets().into_iter().take(len as usize).map(|d| format!("{:02x}", d)).collect();
+                let label: String = ip6.octets().into_iter().take(len as usize).map(|d| format!("{:02x}", d)).collect();
+                let subdomain = format!("{}.{}", label, domain);
                 let ifs = IfState {
                     ifindex: event.ifindex,
-                    subdomain: v6net,
+                    subdomain: subdomain,
+                    userver: None,
                 };
                 v6_ifs.insert(ip6, event.plen.into(), ifs);
             },
         };
     }
 }
-fn send_update(msg: &services::ServiceEvent)
+
+fn build_update(se: &services::ServiceEvent) -> Message
 {
-    println!("sending msg: {}", msg.sname);
+    println!("sending msg: {}", se.sname);
+    use std::str::FromStr;
+    use domain_core::bits::{Dname, MessageBuilder, SectionBuilder, RecordSectionBuilder};
+    use domain_core::iana::opcode;
+    use domain_core::iana::Rtype;
+
+    let mut msg = MessageBuilder::new_udp();
+    msg.header_mut().set_opcode(opcode::Opcode::Update);
+
+    // Zone section
+    let name = Dname::from_str(&se.subdomain).unwrap();
+    msg.push((&name, Rtype::Soa)).unwrap();
+
+    // skip prereq sections
+    let msg = msg.answer();
+
+    // add to Update section
+    let mut msg = msg.authority();
+    match &se.sdata {
+        AllRecordData::A(_addr) => {
+            msg.push((&se.sname, 86400, se.sdata.clone())).unwrap();
+        },
+        AllRecordData::Aaaa(_addr) => {
+            msg.push((&se.sname, 86400, se.sdata.clone())).unwrap();
+        },  
+        AllRecordData::Ptr(_name) => {
+            msg.push((&se.sname, 86400, se.sdata.clone())).unwrap();
+        },  
+        AllRecordData::Srv(_srv) => {
+            msg.push((&se.sname, 86400, se.sdata.clone())).unwrap();
+        },  
+        AllRecordData::Txt(_txt) => {
+            msg.push((&se.sname, 86400, se.sdata.clone())).unwrap();
+        },
+        _ => {},
+    }           
+
+    let mut msg = msg.opt().unwrap();
+    msg.set_udp_payload_size(4096);
+    msg.freeze()
 }
 
 fn main() {
@@ -263,10 +318,20 @@ fn main() {
         exit(1);
     }
 
+    if options.domain.len() == 0 {
+        let resolver = StubResolver::new();
+        let s = resolver.options();
+        if s.search.len() > 0 {
+            options.domain = s.search[0].to_string();
+        } else {
+            eprintln!("no domain name suffix available");
+            exit(1);
+        }
+    }
     // initialize interface index trees
     let mut v4_ifs = treebitmap::IpLookupTable::new();
     let mut v6_ifs = treebitmap::IpLookupTable::new();
-    index_interface_trees_init(&mut v4_ifs, &mut v6_ifs);
+    interface_trees_init(options.domain, &mut v4_ifs, &mut v6_ifs);
 
     // create channel for ServiceEvents
     let (tx, rx) = mpsc::channel(1000);
@@ -275,25 +340,25 @@ fn main() {
     // create a services cache per interface index, IPv4 & IPv6 should be merged
     let mut cache_map: HashMap<u32, HashMap<RecordKey, RecordInfo>> = HashMap::new();
 
-    let service_sink = rx.for_each(move |msg: services::ServiceEvent| {
-        if !cache_map.contains_key(&msg.ifindex) {
+    let service_sink = rx.for_each(move |se: services::ServiceEvent| {
+        if !cache_map.contains_key(&se.ifindex) {
             let table = HashMap::new();
-            cache_map.insert(msg.ifindex, table);
+            cache_map.insert(se.ifindex, table);
         }
-        let cache = cache_map.get_mut(&msg.ifindex).unwrap();
-        let when = Instant::now() + Duration::from_secs(msg.ttl.into());
+        let cache = cache_map.get_mut(&se.ifindex).unwrap();
+        let when = Instant::now() + Duration::from_secs(se.ttl.into());
 
         let key = RecordKey {
-            name: msg.sname.clone(),
-            data: msg.sdata.clone(),
+            name: se.sname.clone(),
+            data: se.sdata.clone(),
         };
-        let val = RecordInfo { ttl: msg.ttl };
+        let val = RecordInfo { ttl: se.ttl };
 
         match cache.entry(key.clone()) {
             Vacant(entry) => {
                 println!(
                     "caching {} + {:?} on ifindex: {}, subdomain: {}",
-                    key.name, key.data, msg.ifindex, msg.subdomain,
+                    key.name, key.data, se.ifindex, se.subdomain,
                 );
                 let task = Delay::new(when)
                     .map_err(|e| panic!("delay errored; err={:?}", e))
@@ -306,15 +371,15 @@ fn main() {
                 entry.insert(val);
 
                 // send new cache entries to DNS Update server.
-                send_update(&msg);
+                update::send(build_update(&se));
             }
             Occupied(exists) => {
                 println!(
                     "found: {} + {:?} on ifindex: {}, subdomain {}",
-                    key.name, key.data, msg.ifindex, msg.subdomain,
+                    key.name, key.data, se.ifindex, se.subdomain,
                 );
                 let mut entry = exists.into_mut();
-                entry.ttl = msg.ttl;
+                entry.ttl = se.ttl;
             }
         };
         Ok(())
@@ -331,7 +396,7 @@ fn main() {
 
             let mut source = tx.clone();
             Some(v4_reader.for_each(move |(msg, addr)| {
-                match index_for_v4_address(addr, &v4_ifs) {
+                match ifstate_for_v4_address(addr, &v4_ifs) {
                     Some(ifs) => match extract_mdns_response(ifs.ifindex, &ifs.subdomain, addr, &msg, &mut source) {
                         Ok(()) => {}
                         Err(e) => {
@@ -359,7 +424,7 @@ fn main() {
             let mut source = tx.clone();
 
             Some(v6_reader.for_each(move |(msg, addr)| {
-                match index_for_v6_address(addr, &v6_ifs) {
+                match ifstate_for_v6_address(addr, &v6_ifs) {
                     Some(ifs) => match extract_mdns_response(ifs.ifindex, &ifs.subdomain, addr, &msg, &mut source) {
                         Ok(()) => {}
                         Err(e) => {
