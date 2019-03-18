@@ -1,3 +1,4 @@
+use crate::update::UpdateServer;
 use crate::services::{ServiceAction, ServiceEvent};
 use bytes::Bytes;
 use domain_core::bits::message::Message;
@@ -9,6 +10,7 @@ use domain_resolv::StubResolver;
 use futures::sync::mpsc;
 use interface_events::{get_current_events, IfEvent};
 use lazy_static::lazy_static;
+use socket2::Domain;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::error::Error;
@@ -48,16 +50,9 @@ struct RecordInfo {
 }
 
 #[derive(Debug)]
-struct UpdateServer {
-    sa: SocketAddr,
-    socket: Option<UdpSocket>,
-}
-
-#[derive(Debug)]
 struct IfState {
     ifindex: u32,
     subdomain: String,
-    userver: Option<UpdateServer>,
 }
 
 fn extract_mdns_record(ifindex: u32, subdomain: &String, from: SocketAddr, record: Record<ParsedDname, AllRecordData<ParsedDname>>) -> Option<ServiceEvent>
@@ -133,7 +128,7 @@ fn extract_mdns_record(ifindex: u32, subdomain: &String, from: SocketAddr, recor
                 record.ttl(),
             )),
         _ => {
-            println!("        not one of above: {}", record.rtype());
+            println!("        record {} not handled", record.rtype());
             return None;
         },
     }
@@ -165,6 +160,7 @@ fn extract_mdns_response(
                 Ok(r) => {
                     let se = extract_mdns_record(ifindex, subdomain, from, r);
                     if let Some(event) = se {
+                        // send over channel combining IPv4 and IPv6 received mDNS messages
                         tx.send(event).wait().unwrap();
                     }
                 },
@@ -212,8 +208,7 @@ fn interface_trees_init(
     v4_ifs: &mut treebitmap::IpLookupTable<std::net::Ipv4Addr, IfState>,
     v6_ifs: &mut treebitmap::IpLookupTable<std::net::Ipv6Addr, IfState>,
 ) {
-    // lookup ifindex by source IP address until we have IN_PKTINFO/RECV_IF
-
+    // Build tree of interface address/prefix lengths containing ifindex for later verification
     let events = get_current_events()
         .into_iter()
         .filter(|event| IfEvent::not_link_local(event))
@@ -223,11 +218,9 @@ fn interface_trees_init(
             IpAddr::V4(ip4) => {
                 let label: String = ip4.octets().into_iter().map(|d| format!("{:02x}", d)).collect();
                 let subdomain = format!("{}.{}", label, domain);
-                //update::resolve_server()
                 let ifs = IfState {
                     ifindex: event.ifindex,
                     subdomain: subdomain,
-                    userver: None,
                 };
                 v4_ifs.insert(ip4, event.plen.into(), ifs);
             },
@@ -241,11 +234,33 @@ fn interface_trees_init(
                 let ifs = IfState {
                     ifindex: event.ifindex,
                     subdomain: subdomain,
-                    userver: None,
                 };
                 v6_ifs.insert(ip6, event.plen.into(), ifs);
             },
         };
+    }
+}
+
+fn build_upserver(_family: Domain, _subdomain: String) -> Option<UpdateServer>
+{
+    //update::resolve_server()
+    return None
+}
+
+fn update_servers_init(
+    servers: &mut HashMap<String, UpdateServer>,
+    v4_ifs: &treebitmap::IpLookupTable<std::net::Ipv4Addr, IfState>,
+    v6_ifs: &treebitmap::IpLookupTable<std::net::Ipv6Addr, IfState>,
+) {
+    for (_addr, _plen, intf) in v4_ifs.iter() {
+        if let Some(up) = build_upserver(Domain::ipv4(), intf.subdomain.clone()) {
+            servers.insert(intf.subdomain.clone(), up);
+        }
+    }
+    for (_addr, _plen, intf) in v6_ifs.iter() {
+        if let Some(up) = build_upserver(Domain::ipv6(), intf.subdomain.clone()) {
+            servers.insert(intf.subdomain.clone(), up);
+        }
     }
 }
 
@@ -333,6 +348,10 @@ fn main() {
     let mut v6_ifs = treebitmap::IpLookupTable::new();
     interface_trees_init(options.domain, &mut v4_ifs, &mut v6_ifs);
 
+    // create a mapping from subdomain name to update server
+    let mut upservers: HashMap<String, UpdateServer> = HashMap::new();
+    update_servers_init(&mut upservers, &v4_ifs, &v6_ifs);
+
     // create channel for ServiceEvents
     let (tx, rx) = mpsc::channel(1000);
 
@@ -340,6 +359,7 @@ fn main() {
     // create a services cache per interface index, IPv4 & IPv6 should be merged
     let mut cache_map: HashMap<u32, HashMap<RecordKey, RecordInfo>> = HashMap::new();
 
+    // receive mDNS events over channel
     let service_sink = rx.for_each(move |se: services::ServiceEvent| {
         if !cache_map.contains_key(&se.ifindex) {
             let table = HashMap::new();
@@ -371,7 +391,10 @@ fn main() {
                 entry.insert(val);
 
                 // send new cache entries to DNS Update server.
-                update::send(build_update(&se));
+                if let Some(ups) = upservers.get(&se.subdomain) {
+                    update::send(ups, build_update(&se));
+                }
+                
             }
             Occupied(exists) => {
                 println!(
