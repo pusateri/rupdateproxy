@@ -11,6 +11,7 @@ use futures::sync::mpsc;
 use interface_events::{get_current_events, IfEvent};
 use lazy_static::lazy_static;
 use socket2::Domain;
+use std::sync::{Arc, Mutex};
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::error::Error;
@@ -36,6 +37,8 @@ lazy_static! {
     pub static ref MDNS_IPV4: SocketAddr = SocketAddr::new(Ipv4Addr::new(224,0,0,251).into(), MDNS_PORT);
     /// link-local mDNS ipv6 address https://www.iana.org/assignments/ipv6-multicast-addresses/ipv6-multicast-addresses.xhtml
     pub static ref MDNS_IPV6: SocketAddr = SocketAddr::new(Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 0x00FB).into(), MDNS_PORT);
+
+    static ref USMAP: Arc<Mutex<HashMap<String, UpdateServer>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -241,26 +244,19 @@ fn interface_trees_init(
     }
 }
 
-fn build_upserver(_family: Domain, _subdomain: String) -> Option<UpdateServer>
-{
-    //update::resolve_server()
-    return None
-}
-
 fn update_servers_init(
-    servers: &mut HashMap<String, UpdateServer>,
     v4_ifs: &treebitmap::IpLookupTable<std::net::Ipv4Addr, IfState>,
     v6_ifs: &treebitmap::IpLookupTable<std::net::Ipv6Addr, IfState>,
 ) {
     for (_addr, _plen, intf) in v4_ifs.iter() {
-        if let Some(up) = build_upserver(Domain::ipv4(), intf.subdomain.clone()) {
-            servers.insert(intf.subdomain.clone(), up);
-        }
+        let up = update::UpdateServer::new(Domain::ipv4(), intf.subdomain.clone());
+        let mut servers = USMAP.lock().unwrap();
+        servers.insert(intf.subdomain.clone(), up);
     }
     for (_addr, _plen, intf) in v6_ifs.iter() {
-        if let Some(up) = build_upserver(Domain::ipv6(), intf.subdomain.clone()) {
-            servers.insert(intf.subdomain.clone(), up);
-        }
+        let up = update::UpdateServer::new(Domain::ipv6(), intf.subdomain.clone());
+        let mut servers = USMAP.lock().unwrap();
+        servers.insert(intf.subdomain.clone(), up);
     }
 }
 
@@ -349,8 +345,8 @@ fn main() {
     interface_trees_init(options.domain, &mut v4_ifs, &mut v6_ifs);
 
     // create a mapping from subdomain name to update server
-    let mut upservers: HashMap<String, UpdateServer> = HashMap::new();
-    update_servers_init(&mut upservers, &v4_ifs, &v6_ifs);
+    // TODO: periodically refresh
+    update_servers_init(&v4_ifs, &v6_ifs);
 
     // create channel for ServiceEvents
     let (tx, rx) = mpsc::channel(1000);
@@ -360,6 +356,7 @@ fn main() {
     let mut cache_map: HashMap<u32, HashMap<RecordKey, RecordInfo>> = HashMap::new();
 
     // receive mDNS events over channel
+    let servers = USMAP.lock().unwrap();
     let service_sink = rx.for_each(move |se: services::ServiceEvent| {
         if !cache_map.contains_key(&se.ifindex) {
             let table = HashMap::new();
@@ -391,7 +388,7 @@ fn main() {
                 entry.insert(val);
 
                 // send new cache entries to DNS Update server.
-                if let Some(ups) = upservers.get(&se.subdomain) {
+                if let Some(ups) = servers.get(&se.subdomain) {
                     update::send(ups, build_update(&se));
                 }
                 

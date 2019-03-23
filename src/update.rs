@@ -1,14 +1,40 @@
-use std::net::UdpSocket;
+use socket2::Domain;
+use futures::stream::{SplitSink, SplitStream};
+use tokio::prelude::*;
+use tokio::net::{UdpFramed, UdpSocket};
+use tokio_codec::BytesCodec;
 use std::net::SocketAddr;
 use std::net::Ipv4Addr;
 use domain_core::bits::message::Message;
 
 const DNS_PORT: u16 = 53;
 
+/*
+ * An Update server instance is created for each subdomain (created for each IP Subnet)
+ * It must be able to handle sending a DNS Update message and waiting for the response.
+ * Any errors should propagate upstream.
+ */
+
 #[derive(Debug)]
 pub struct UpdateServer {
+	subdomain: String,
     sa: SocketAddr,
-    socket: Option<UdpSocket>,
+    sink: SplitSink<UdpFramed<BytesCodec>>,
+    stream: SplitStream<UdpFramed<BytesCodec>>,
+}
+
+impl UpdateServer {
+    pub fn new(_family: Domain, subdomain: String) -> Self {
+    	let addr = SocketAddr::new(Ipv4Addr::new(127,0,0,1).into(), 8053);
+    	let sock = UdpSocket::bind(&addr).expect("bind failed");
+    	let (a_sink, a_stream) = UdpFramed::new(sock, BytesCodec::new()).split();
+        UpdateServer {
+        	subdomain: subdomain,
+            sa: addr,
+            sink: a_sink,
+            stream: a_stream,
+        }
+    }
 }
 
 // eventually, this should perform a SRV query _dns-update._udp.<subdomain>.<domain>. 
@@ -17,7 +43,21 @@ pub fn resolve_server(_domain: String) -> SocketAddr
 	SocketAddr::new(Ipv4Addr::new(127,0,0,1).into(), DNS_PORT)
 }
 
-pub fn send(_server: &UpdateServer, _msg: Message)
+pub fn send(us: &'static UpdateServer, msg: Message)
 {
-	
+    let task = us.sink.send((msg.as_bytes().clone(), us.sa))
+    	.and_then(move |_| {
+        	let _a_stream = us.stream.take(1)
+        	.into_future()
+        	.map(move |(_response, addr)| {
+            	println!("task recv from {:?}", addr);
+        	})
+        	.map_err(|e| panic!("send update err={:?}", e));
+        	Ok(())
+    	})
+    	.or_else(|n| {
+                println!("read {:?} bytes2", n);
+                Ok(())
+        });
+    tokio::spawn(task);
 }

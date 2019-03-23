@@ -1,6 +1,3 @@
-extern crate socket2;
-extern crate tokio;
-
 use std::io;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 
