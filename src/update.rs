@@ -1,4 +1,7 @@
+#![feature(optin_builtin_traits)]
+
 use socket2::Domain;
+use std::sync::{Arc, Mutex};
 use futures::stream::{SplitSink, SplitStream};
 use tokio::prelude::*;
 use tokio::net::{UdpFramed, UdpSocket};
@@ -15,13 +18,16 @@ const DNS_PORT: u16 = 53;
  * Any errors should propagate upstream.
  */
 
-#[derive(Debug)]
+
 pub struct UpdateServer {
 	subdomain: String,
     sa: SocketAddr,
-    sink: SplitSink<UdpFramed<BytesCodec>>,
-    stream: SplitStream<UdpFramed<BytesCodec>>,
+    sink: Arc<Mutex<SplitSink<UdpFramed<BytesCodec>>>>,
+    stream: Arc<Mutex<SplitStream<UdpFramed<BytesCodec>>>>,
 }
+
+unsafe impl Send for UpdateServer {}
+unsafe impl Sync for UpdateServer {}
 
 impl UpdateServer {
     pub fn new(_family: Domain, subdomain: String) -> Self {
@@ -31,8 +37,8 @@ impl UpdateServer {
         UpdateServer {
         	subdomain: subdomain,
             sa: addr,
-            sink: a_sink,
-            stream: a_stream,
+            sink: Arc::new(Mutex::new(a_sink)),
+            stream: Arc::new(Mutex::new(a_stream)),
         }
     }
 }
@@ -43,11 +49,14 @@ pub fn resolve_server(_domain: String) -> SocketAddr
 	SocketAddr::new(Ipv4Addr::new(127,0,0,1).into(), DNS_PORT)
 }
 
-pub fn send(us: &'static UpdateServer, msg: Message)
+pub fn send(uswrap: &Arc<Mutex<UpdateServer>>, msg: Message)
 {
-    let task = us.sink.send((msg.as_bytes().clone(), us.sa))
+	let us = uswrap.lock().unwrap();
+	let a_sink = us.sink.lock().unwrap();
+    let task = a_sink.send((msg.as_bytes().clone(), us.sa))
     	.and_then(move |_| {
-        	let _a_stream = us.stream.take(1)
+    		let a_stream = us.stream.lock().unwrap();
+			let _a_stream = a_stream.take(1)
         	.into_future()
         	.map(move |(_response, addr)| {
             	println!("task recv from {:?}", addr);
@@ -56,8 +65,8 @@ pub fn send(us: &'static UpdateServer, msg: Message)
         	Ok(())
     	})
     	.or_else(|n| {
-                println!("read {:?} bytes2", n);
-                Ok(())
+            println!("read {:?} bytes2", n);
+            Ok(())
         });
     tokio::spawn(task);
 }

@@ -38,7 +38,7 @@ lazy_static! {
     /// link-local mDNS ipv6 address https://www.iana.org/assignments/ipv6-multicast-addresses/ipv6-multicast-addresses.xhtml
     pub static ref MDNS_IPV6: SocketAddr = SocketAddr::new(Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 0x00FB).into(), MDNS_PORT);
 
-    static ref USMAP: Arc<Mutex<HashMap<String, UpdateServer>>> = Arc::new(Mutex::new(HashMap::new()));
+    static ref USMAP: HashMap<String, Arc<Mutex<UpdateServer>>> = HashMap::new();
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -250,13 +250,13 @@ fn update_servers_init(
 ) {
     for (_addr, _plen, intf) in v4_ifs.iter() {
         let up = update::UpdateServer::new(Domain::ipv4(), intf.subdomain.clone());
-        let mut servers = USMAP.lock().unwrap();
-        servers.insert(intf.subdomain.clone(), up);
+        //let mut servers = USMAP.lock().unwrap();
+        USMAP.insert(intf.subdomain.clone(), Arc::new(Mutex::new(up)));
     }
     for (_addr, _plen, intf) in v6_ifs.iter() {
         let up = update::UpdateServer::new(Domain::ipv6(), intf.subdomain.clone());
-        let mut servers = USMAP.lock().unwrap();
-        servers.insert(intf.subdomain.clone(), up);
+        //let mut servers = USMAP.lock().unwrap();
+        USMAP.insert(intf.subdomain.clone(), Arc::new(Mutex::new(up)));
     }
 }
 
@@ -356,7 +356,6 @@ fn main() {
     let mut cache_map: HashMap<u32, HashMap<RecordKey, RecordInfo>> = HashMap::new();
 
     // receive mDNS events over channel
-    let servers = USMAP.lock().unwrap();
     let service_sink = rx.for_each(move |se: services::ServiceEvent| {
         if !cache_map.contains_key(&se.ifindex) {
             let table = HashMap::new();
@@ -388,7 +387,7 @@ fn main() {
                 entry.insert(val);
 
                 // send new cache entries to DNS Update server.
-                if let Some(ups) = servers.get(&se.subdomain) {
+                if let Some(ups) = USMAP.get(&se.subdomain) {
                     update::send(ups, build_update(&se));
                 }
                 
