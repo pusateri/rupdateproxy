@@ -7,20 +7,20 @@ edition = "2018"
 
 [dependencies]
 futures = "^0.1"
-tokio = "^0.1"
-tokio-codec = "^0.1"
-tokio-timer = "^0.2"
 lazy_static = "^1.0"
 bytes = "^0.4"
 socket2 = { version = "0.3.7", features = ["reuseport"] }
 domain-core = { git = "https://github.com/NLnetLabs/domain-core.git" }
 domain-resolv = { git = "https://github.com/NLnetLabs/domain-core.git" }
 nix = { git = "https://github.com/nix-rust/nix.git" }
+crossbeam-channel = "^0.3"
 interface-events = { git = "https://github.com/pusateri/interface-events.git" }
 hostname ="^0.1"
 treebitmap = ">= 0.3"
 argparse = ">= 0.2"
 daemonize = ">= 0.3"
+mio = "^0.6"
+slab = "^0.4"
 
 [build-dependencies]
 git-version = "^0.2"
