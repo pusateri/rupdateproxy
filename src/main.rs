@@ -51,6 +51,7 @@ struct RecordInfo {
 struct IfState {
     ifindex: u32,
     subdomain: String,
+    token: Token,
 }
 
 fn extract_mdns_record(ifindex: u32, subdomain: &String, from: SocketAddr, record: Record<ParsedDname, AllRecordData<ParsedDname>>) -> Option<ServiceEvent>
@@ -114,20 +115,10 @@ fn extract_mdns_record(ifindex: u32, subdomain: &String, from: SocketAddr, recor
                 txt.text(),
                 record.ttl(),
             )),
-        AllRecordData::Opt(opt) =>
-            Some(ServiceEvent::new_opt(
-                ServiceAction::DYNAMIC,
-                record.owner().to_name(),
-                record.data().clone(),
-                ifindex,
-                subdomain,
-                from,
-                opt.clone(),
-                record.ttl(),
-            )),
+        AllRecordData::Opt(_opt) => None,
         _ => {
             println!("        record {} not handled", record.rtype());
-            return None;
+            None
         },
     }
 }
@@ -138,7 +129,7 @@ fn extract_mdns_response(
     subdomain: &String,
     from: SocketAddr,
     buf: &[u8],
-    tx: &mut Sender<services::ServiceEvent>,
+    tx: &Sender<services::ServiceEvent>,
 ) {
     let msg = Message::from_bytes(Bytes::from(buf)).expect("DNS Message::from_bytes failed");
 
@@ -202,9 +193,11 @@ fn ifstate_for_v6_address(
 
 fn interface_trees_init(
     domain: String,
-    v4_ifs: &mut treebitmap::IpLookupTable<std::net::Ipv4Addr, IfState>,
-    v6_ifs: &mut treebitmap::IpLookupTable<std::net::Ipv6Addr, IfState>,
-) {
+) -> (treebitmap::IpLookupTable<std::net::Ipv4Addr, IfState>,
+      treebitmap::IpLookupTable<std::net::Ipv6Addr, IfState>) {
+
+    let mut v4_ifs = treebitmap::IpLookupTable::new();
+    let mut v6_ifs = treebitmap::IpLookupTable::new();
     // Build tree of interface address/prefix lengths containing ifindex for later verification
     let events = get_current_events()
         .into_iter()
@@ -218,6 +211,7 @@ fn interface_trees_init(
                 let ifs = IfState {
                     ifindex: event.ifindex,
                     subdomain: subdomain,
+                    token: Token(0),
                 };
                 v4_ifs.insert(ip4, event.plen.into(), ifs);
             },
@@ -231,11 +225,13 @@ fn interface_trees_init(
                 let ifs = IfState {
                     ifindex: event.ifindex,
                     subdomain: subdomain,
+                    token: Token(event.ifindex as usize),
                 };
                 v6_ifs.insert(ip6, event.plen.into(), ifs);
             },
         };
     }
+    (v4_ifs, v6_ifs)
 }
 
 fn update_servers_init(
@@ -333,9 +329,7 @@ fn main() {
         }
     }
     // initialize interface index trees
-    let mut v4_ifs = treebitmap::IpLookupTable::new();
-    let mut v6_ifs = treebitmap::IpLookupTable::new();
-    interface_trees_init(options.domain, &mut v4_ifs, &mut v6_ifs);
+    let (v4_ifs, v6_ifs) = interface_trees_init(options.domain);
 
     // create a mapping from subdomain name to update server
     // TODO: periodically refresh
@@ -412,18 +406,17 @@ fn main() {
     }
 
     let mut events = Events::with_capacity(1024);
-    let mut source = tx.clone();
     let mut buf = [0; 4096];
     loop {
         poll.poll(&mut events, None).expect("poll.poll failed");
-        for event in events.iter() {
+        for event in &events {
             match event.token() {
                 IPV4MC_ALLIF => {
                     let (_length, from_addr) = v4_socket.recv_from(&mut buf).expect("recv_from failed");
                     //println!("event from {:?}", from_addr);
                     match ifstate_for_v4_address(from_addr, &v4_ifs) {
                         Some(ifs) => {
-                            extract_mdns_response(ifs.ifindex, &ifs.subdomain, from_addr, &buf, &mut source);
+                            extract_mdns_response(ifs.ifindex, &ifs.subdomain, from_addr, &buf, &tx);
                         },
                         None => {
                             eprintln!("No interface for addr {:?}", from_addr);

@@ -2,6 +2,7 @@ use socket2::Domain;
 use std::sync::{Arc, Mutex};
 use std::net::SocketAddr;
 use std::net::Ipv4Addr;
+use mio::net::UdpSocket;
 use domain_core::bits::message::Message;
 
 const DNS_PORT: u16 = 53;
@@ -15,6 +16,7 @@ const DNS_PORT: u16 = 53;
 
 pub struct UpdateServer {
 	subdomain: String,
+	//sock: UdpSocket,
 }
 
 impl UpdateServer {
