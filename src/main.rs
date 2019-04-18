@@ -16,11 +16,11 @@ use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use std::process::exit;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use mio::net::UdpSocket;
 use mio::{Events, Ready, Poll, PollOpt, Token};
-use std::sync::mpsc;
-use std::sync::mpsc::Sender;
+use mio_extras::channel;
+use mio_extras::timer::Timer;
 use treebitmap;
 
 mod args;
@@ -131,7 +131,7 @@ fn extract_mdns_response(
     subdomain: &String,
     from: SocketAddr,
     buf: &[u8],
-    tx: &Sender<services::ServiceEvent>,
+    tx: &channel::Sender<services::ServiceEvent>,
 ) {
     let msg = Message::from_bytes(Bytes::from(buf)).expect("DNS Message::from_bytes failed");
 
@@ -171,6 +171,7 @@ fn extract_mdns_response(
             let se = extract_mdns_record(ifindex, subdomain, from, r);
             if let Some(event) = se {
                 // send over channel combining IPv4 and IPv6 received mDNS messages
+                println!("channel send");
                 tx.send(event).unwrap();
             }
         }
@@ -362,63 +363,77 @@ fn main() {
     // TODO: periodically refresh
     let usmap = update_servers_init(&v4_ifs, &v6_ifs);
 
-    // create channel for ServiceEvents
-    let (tx, rx) = mpsc::channel::<services::ServiceEvent>();
-
-    // create cache receiver for ServiceEvents
-    // create a services cache per interface index, IPv4 & IPv6 should be merged
-    let mut cache_map: HashMap<u32, HashMap<RecordKey, RecordInfo>> = HashMap::new();
+    // create mio aware channel for ServiceEvents
+    let (tx, rx) = channel::channel::<services::ServiceEvent>();
 
     // receive mDNS events over channel
-    let c_usmap = usmap.clone();
+    let usmap2 = usmap.clone();
     thread::spawn(move || {
-        for se in rx.iter() {
-            if !cache_map.contains_key(&se.ifindex) {
-                let table = HashMap::new();
-                cache_map.insert(se.ifindex, table);
-            }
-            let cache = cache_map.get_mut(&se.ifindex).unwrap();
-            //let when = Instant::now() + Duration::from_secs(se.ttl.into());
+        const CHANNEL: Token = Token(1000);
+        let poll = Poll::new().unwrap();
+        let mut timers = HashMap::new();
+        let mut events = Events::with_capacity(1024);
+        let mut tok = 1;
 
-            let key = RecordKey {
-                name: se.sname.clone(),
-                data: se.sdata.clone(),
-            };
-            let val = RecordInfo { ttl: se.ttl };
+        // create cache receiver for ServiceEvents
+        // create a services cache per interface index, IPv4 & IPv6 should be merged
+        let mut cache_map: HashMap<u32, HashMap<RecordKey, RecordInfo>> = HashMap::new();
 
-            match cache.entry(key.clone()) {
-                Vacant(entry) => {
-                    println!(
-                        "caching {} + {:?} on ifindex: {}, subdomain: {}",
-                        key.name, key.data, se.ifindex, se.subdomain,
-                    );
-                    /* TODO: 
-                    let task = Delay::new(when)
-                        .map_err(|e| panic!("delay errored; err={:?}", e))
-                        .and_then(move |_| {
-                            println!("timeout for {} + {:?}", key.name, key.data);
-                            Ok(())
-                        });
-
-                    tokio::spawn(task);
-                    */
-                    entry.insert(val);
-                    
-                    // send new cache entries to DNS Update server.
-                    let us = c_usmap.lock().unwrap();
-                    if let Some(ups) = us.get(&se.subdomain) {
-                        update::send(ups, build_update(&se));
+        poll.register(&rx, CHANNEL, Ready::readable(), PollOpt::level()).unwrap();
+        loop {
+            poll.poll(&mut events, None).expect("poll.poll failed");
+            for event in events.iter() {
+                println!("channel recv");
+                // rx channel token
+                if event.token() == CHANNEL {
+                    let se: ServiceEvent = rx.try_recv().unwrap();
+                    if !cache_map.contains_key(&se.ifindex) {
+                        let table = HashMap::new();
+                        cache_map.insert(se.ifindex, table);
                     }
+                    let cache = cache_map.get_mut(&se.ifindex).unwrap();
+                    let key = RecordKey {
+                        name: se.sname.clone(),
+                        data: se.sdata.clone(),
+                    };
+                    let val = RecordInfo { ttl: se.ttl };
+
+                    match cache.entry(key.clone()) {
+                        Vacant(entry) => {
+                            println!(
+                                "caching {} + {:?} on ifindex: {}, subdomain: {}",
+                                key.name, key.data, se.ifindex, se.subdomain,
+                            );
+                            // create a timer for the cache entry se.ttl.into()
+                            let when = Duration::from_secs(5);
+                            let mut timer = Timer::default();
+                            let timer_token = Token(tok);
+                            println!("tok: {} when: {:?}", tok, when);
+                            tok += 1;
+                            timers.insert(timer_token, timer.set_timeout(when, key));
+                            poll.register(&timer, timer_token, Ready::readable(), PollOpt::edge()).unwrap();
+
+                            entry.insert(val);
+
+                            // send new cache entries to DNS Update server.
+                            let us = usmap2.lock().unwrap();
+                            if let Some(ups) = us.get(&se.subdomain) {
+                                update::send(ups, build_update(&se));
+                            }
+                        }
+                        Occupied(exists) => {
+                            println!(
+                                "found: {} + {:?} on ifindex: {}, subdomain {}",
+                                key.name, key.data, se.ifindex, se.subdomain,
+                            );
+                            let mut entry = exists.into_mut();
+                            entry.ttl = se.ttl;
+                        }
+                    }
+                } else {
+                    println!("timer: {:?}", event)
                 }
-                Occupied(exists) => {
-                    println!(
-                        "found: {} + {:?} on ifindex: {}, subdomain {}",
-                        key.name, key.data, se.ifindex, se.subdomain,
-                    );
-                    let mut entry = exists.into_mut();
-                    entry.ttl = se.ttl;
-                }
-            };
+            }
         }
     });
 
@@ -441,7 +456,6 @@ fn main() {
             match event.token() {
                 IPV4MC_ALLIF => {
                     let (_length, from_addr) = v4_socket.recv_from(&mut buf).expect("recv_from failed");
-                    //println!("event from {:?}", from_addr);
                     match ifstate_for_v4_address(from_addr, &v4_ifs) {
                         Some(intf) => {
                             let ifs = intf.lock().unwrap();

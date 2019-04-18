@@ -20,6 +20,7 @@ treebitmap = ">= 0.3"
 argparse = ">= 0.2"
 daemonize = ">= 0.3"
 mio = "^0.6"
+mio-extras = "2.0.5"
 slab = "^0.4"
 
 [build-dependencies]
