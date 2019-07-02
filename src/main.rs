@@ -1,10 +1,10 @@
 
 use crate::services::{ServiceAction, ServiceEvent};
 use bytes::Bytes;
-use domain_core::bits::message::Message;
-use domain_core::bits::name::{ParsedDname, ToDname};
-use domain_core::bits::Dname;
-use domain_core::bits::record::Record;
+use domain_core::message::Message;
+use domain_core::name::{Label, ParsedDname, ToDname};
+use domain_core::Dname;
+use domain_core::record::Record;
 use domain_core::rdata::AllRecordData;
 use domain_resolv::StubResolver;
 use interface_events::{IfController, IfEvent};
@@ -235,7 +235,7 @@ fn update_servers_init(
 fn build_update(se: &services::ServiceEvent) -> Message
 {
     use std::str::FromStr;
-    use domain_core::bits::{MessageBuilder, SectionBuilder, RecordSectionBuilder};
+    use domain_core::{MessageBuilder, SectionBuilder, RecordSectionBuilder};
     use domain_core::iana::opcode;
     use domain_core::iana::Rtype;
 
@@ -251,8 +251,19 @@ fn build_update(se: &services::ServiceEvent) -> Message
 
     // add to Update section
     let mut msg = msg.authority();
+    if se.sname.last().as_slice() == b"local" {
+
+    }
+    let labels: Vec<&Label> = se.sname.iter().collect();
+    
     match &se.sdata {
         AllRecordData::A(_addr) => {
+            /*
+            let labels = se.sname.iter().collect();
+            if let Some(last) = labels.last_mut() {
+                *last = &se.subdomain;
+            }
+            */
             msg.push((&se.sname, 86400, se.sdata.clone())).unwrap();
         },
         AllRecordData::Aaaa(_addr) => {
@@ -386,12 +397,12 @@ fn main() {
                 println!("channel recv");
                 // rx channel token
                 if event.token() == CHANNEL {
-                    let se: ServiceEvent = rx.try_recv().unwrap();
+                    let se: ServiceEvent = rx.try_recv().expect("try_recv() on event channel failed");
                     if !cache_map.contains_key(&se.ifindex) {
                         let table = HashMap::new();
                         cache_map.insert(se.ifindex, table);
                     }
-                    let cache = cache_map.get_mut(&se.ifindex).unwrap();
+                    let cache = cache_map.get_mut(&se.ifindex).expect("cache_map get_mut() failed");
                     let key = RecordKey {
                         name: se.sname.clone(),
                         data: se.sdata.clone(),

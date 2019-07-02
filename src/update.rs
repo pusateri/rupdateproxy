@@ -1,9 +1,10 @@
-use socket2::Domain;
+
+use socket2::{Domain, Protocol, Socket, Type};
 use std::sync::{Arc, Mutex};
 use std::net::SocketAddr;
 use std::net::Ipv4Addr;
 use mio::net::UdpSocket;
-use domain_core::bits::message::Message;
+use domain_core::message::Message;
 
 const DNS_PORT: u16 = 53;
 
@@ -33,12 +34,14 @@ pub struct UpdateServer {
 impl UpdateServer {
     pub fn new(_family: Domain, subdomain: String) -> Self {
         //let addr = SocketAddr::new(Ipv4Addr::new(127,0,0,1).into(), 8053);
+        let socket = Socket::new(Domain::ipv4(), Type::dgram(), Some(Protocol::udp())).expect("ipv4 dgram socket");
+        let mio_socket = UdpSocket::from_socket(socket.into_udp_socket()).expect("mio from_socket()");
         UpdateServer {
             state: UpLocate::Initial,
             subdomain: subdomain,
             target: None,
             port: 0,
-            udp: None,
+            udp: Some(mio_socket),
         }
     }
 
@@ -61,10 +64,12 @@ pub fn resolve_server(_domain: String) -> SocketAddr
     SocketAddr::new(Ipv4Addr::new(127,0,0,1).into(), DNS_PORT)
 }
 
-pub fn send(uswrap: &Arc<Mutex<UpdateServer>>, _msg: Message)
+pub fn send(uswrap: &Arc<Mutex<UpdateServer>>, msg: Message)
 {
-    let _result = { 
-        let _us = uswrap.lock().unwrap();
+    let us = uswrap.lock().unwrap();
+    let addr = SocketAddr::new(Ipv4Addr::new(127,0,0,1).into(), 8053);
+    match &us.udp {
+        Some(socket) => socket.send_to(msg.as_bytes(), &addr).unwrap(),
+        None => 0,
     };
-    
 }
