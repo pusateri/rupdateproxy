@@ -1,26 +1,25 @@
-
 use crate::services::{ServiceAction, ServiceEvent};
 use bytes::Bytes;
 use domain_core::message::Message;
 use domain_core::name::{Label, ParsedDname, ToDname};
-use domain_core::Dname;
-use domain_core::record::Record;
 use domain_core::rdata::AllRecordData;
+use domain_core::record::Record;
+use domain_core::Dname;
 use domain_resolv::StubResolver;
 use interface_events::{IfController, IfEvent};
 use lazy_static::lazy_static;
+use mio::net::UdpSocket;
+use mio::{Events, Poll, PollOpt, Ready, Token};
+use mio_extras::channel;
+use mio_extras::timer::Timer;
 use socket2::Domain;
-use std::thread;
-use std::sync::{Arc, Mutex};
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use std::process::exit;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
-use mio::net::UdpSocket;
-use mio::{Events, Ready, Poll, PollOpt, Token};
-use mio_extras::channel;
-use mio_extras::timer::Timer;
 use treebitmap;
 
 mod args;
@@ -55,73 +54,72 @@ struct IfState {
     token: Token,
 }
 
-fn extract_mdns_record(ifindex: u32, subdomain: &String, from: SocketAddr, record: Record<ParsedDname, AllRecordData<ParsedDname>>) -> Option<ServiceEvent>
-{
+fn extract_mdns_record(
+    ifindex: u32,
+    subdomain: &String,
+    from: SocketAddr,
+    record: Record<ParsedDname, AllRecordData<ParsedDname>>,
+) -> Option<ServiceEvent> {
     match record.data() {
-        AllRecordData::A(addr) =>
-            Some(ServiceEvent::new_a(
-                ServiceAction::DYNAMIC,
-                record.owner().to_name(),
-                record.data().clone(),
-                ifindex,
-                subdomain,
-                from,
-                addr,
-                record.ttl(),
-            )),
-        AllRecordData::Aaaa(addr) =>
-            Some(ServiceEvent::new_aaaa(
-                ServiceAction::DYNAMIC,
-                record.owner().to_name(),
-                record.data().clone(),
-                ifindex,
-                subdomain,
-                from,
-                addr,
-                record.ttl(),
-            )),
-        AllRecordData::Ptr(name) =>
-            Some(ServiceEvent::new_ptr(
-                ServiceAction::DYNAMIC,
-                record.owner().to_name(),
-                record.data().clone(),
-                ifindex,
-                subdomain,
-                from,
-                name,
-                record.ttl(),
-            )),
-        AllRecordData::Srv(srv) =>
-            Some(ServiceEvent::new_srv(
-                ServiceAction::DYNAMIC,
-                record.owner().to_name(),
-                record.data().clone(),
-                ifindex,
-                subdomain,
-                from,
-                srv.priority(),
-                srv.weight(),
-                srv.port(),
-                srv.target(),
-                record.ttl(),
-            )),
-        AllRecordData::Txt(txt) =>
-            Some(ServiceEvent::new_txt(
-                ServiceAction::DYNAMIC,
-                record.owner().to_name(),
-                record.data().clone(),
-                ifindex,
-                subdomain,
-                from,
-                txt.text(),
-                record.ttl(),
-            )),
+        AllRecordData::A(addr) => Some(ServiceEvent::new_a(
+            ServiceAction::DYNAMIC,
+            record.owner().to_name(),
+            record.data().clone(),
+            ifindex,
+            subdomain,
+            from,
+            addr,
+            record.ttl(),
+        )),
+        AllRecordData::Aaaa(addr) => Some(ServiceEvent::new_aaaa(
+            ServiceAction::DYNAMIC,
+            record.owner().to_name(),
+            record.data().clone(),
+            ifindex,
+            subdomain,
+            from,
+            addr,
+            record.ttl(),
+        )),
+        AllRecordData::Ptr(name) => Some(ServiceEvent::new_ptr(
+            ServiceAction::DYNAMIC,
+            record.owner().to_name(),
+            record.data().clone(),
+            ifindex,
+            subdomain,
+            from,
+            name,
+            record.ttl(),
+        )),
+        AllRecordData::Srv(srv) => Some(ServiceEvent::new_srv(
+            ServiceAction::DYNAMIC,
+            record.owner().to_name(),
+            record.data().clone(),
+            ifindex,
+            subdomain,
+            from,
+            srv.priority(),
+            srv.weight(),
+            srv.port(),
+            srv.target(),
+            record.ttl(),
+        )),
+        AllRecordData::Txt(txt) => Some(ServiceEvent::new_txt(
+            ServiceAction::DYNAMIC,
+            record.owner().to_name(),
+            record.data().clone(),
+            ifindex,
+            subdomain,
+            from,
+            txt.text(),
+            record.ttl(),
+        )),
         AllRecordData::Opt(_opt) => None,
         AllRecordData::Nsec(_nsec) => None,
         _ => {
             println!("        record {} not handled", record.rtype());
             None
-        },
+        }
     }
 }
 
@@ -162,11 +160,11 @@ fn extract_mdns_response(
                 Ok(None) => {
                     println!("Unexpected record parse error.");
                     continue;
-                },
+                }
                 Err(err) => {
                     println!("Record type {} data error: {}", t, err);
                     continue;
-                },
+                }
             };
             let se = extract_mdns_record(ifindex, subdomain, from, r);
             if let Some(event) = se {
@@ -215,7 +213,7 @@ fn ifstate_for_v6_address(
 fn update_servers_init(
     v4_ifs: &Arc<Mutex<treebitmap::IpLookupTable<std::net::Ipv4Addr, Arc<Mutex<IfState>>>>>,
     v6_ifs: &Arc<Mutex<treebitmap::IpLookupTable<std::net::Ipv6Addr, Arc<Mutex<IfState>>>>>,
-) -> Arc<Mutex<HashMap <String, Arc<Mutex<update::UpdateServer>>>>> {
+) -> Arc<Mutex<HashMap<String, Arc<Mutex<update::UpdateServer>>>>> {
     let mut usmap = HashMap::new();
     let v4ifs = v4_ifs.lock().unwrap();
     for (_addr, _plen, intf) in v4ifs.iter() {
@@ -232,12 +230,11 @@ fn update_servers_init(
     Arc::new(Mutex::new(usmap))
 }
 
-fn build_update(se: &services::ServiceEvent) -> Message
-{
-    use std::str::FromStr;
-    use domain_core::{MessageBuilder, SectionBuilder, RecordSectionBuilder};
+fn build_update(se: &services::ServiceEvent) -> Message {
     use domain_core::iana::opcode;
     use domain_core::iana::Rtype;
+    use domain_core::{MessageBuilder, RecordSectionBuilder, SectionBuilder};
+    use std::str::FromStr;
 
     let mut msg = MessageBuilder::with_capacity(4096);
     msg.header_mut().set_opcode(opcode::Opcode::Update);
@@ -251,11 +248,9 @@ fn build_update(se: &services::ServiceEvent) -> Message
 
     // add to Update section
     let mut msg = msg.authority();
-    if se.sname.last().as_slice() == b"local" {
-
-    }
+    if se.sname.last().as_slice() == b"local" {}
     let labels: Vec<&Label> = se.sname.iter().collect();
-    
+
     match &se.sdata {
         AllRecordData::A(_addr) => {
             /*
@@ -265,21 +260,21 @@ fn build_update(se: &services::ServiceEvent) -> Message
             }
             */
             msg.push((&se.sname, 86400, se.sdata.clone())).unwrap();
-        },
+        }
         AllRecordData::Aaaa(_addr) => {
             msg.push((&se.sname, 86400, se.sdata.clone())).unwrap();
-        },  
+        }
         AllRecordData::Ptr(_name) => {
             msg.push((&se.sname, 86400, se.sdata.clone())).unwrap();
-        },  
+        }
         AllRecordData::Srv(_srv) => {
             msg.push((&se.sname, 86400, se.sdata.clone())).unwrap();
-        },  
+        }
         AllRecordData::Txt(_txt) => {
             msg.push((&se.sname, 86400, se.sdata.clone())).unwrap();
-        },
-        _ => {},
-    }           
+        }
+        _ => {}
+    }
 
     let mut msg = msg.opt().unwrap();
     msg.set_udp_payload_size(4096);
@@ -337,11 +332,16 @@ fn main() {
         for ifevent in if_rx
             .iter()
             .filter(|event| IfEvent::not_link_local(event))
-            .filter(|event| IfEvent::not_loopback(event)) {
+            .filter(|event| IfEvent::not_loopback(event))
+        {
             match ifevent.ipnet {
                 IpAddr::V4(ip4) => {
                     let mut v4ifs = c_v4_ifs.lock().unwrap();
-                    let label: String = ip4.octets().into_iter().map(|d| format!("{:02x}", d)).collect();
+                    let label: String = ip4
+                        .octets()
+                        .into_iter()
+                        .map(|d| format!("{:02x}", d))
+                        .collect();
                     let subdomain = format!("{}.{}", label, domain);
                     let ifs = IfState {
                         ifindex: ifevent.ifindex,
@@ -349,14 +349,19 @@ fn main() {
                         token: Token(0),
                     };
                     v4ifs.insert(ip4, ifevent.plen.into(), Arc::new(Mutex::new(ifs)));
-                },
+                }
                 IpAddr::V6(ip6) => {
                     let mut v6ifs = c_v6_ifs.lock().unwrap();
                     let mut len: u8 = ifevent.plen / 8;
                     if ifevent.plen % 8 > 0 {
                         len += 1;
                     }
-                    let label: String = ip6.octets().into_iter().take(len as usize).map(|d| format!("{:02x}", d)).collect();
+                    let label: String = ip6
+                        .octets()
+                        .into_iter()
+                        .take(len as usize)
+                        .map(|d| format!("{:02x}", d))
+                        .collect();
                     let subdomain = format!("{}.{}", label, domain);
                     let ifs = IfState {
                         ifindex: ifevent.ifindex,
@@ -364,11 +369,10 @@ fn main() {
                         token: Token(ifevent.ifindex as usize),
                     };
                     v6ifs.insert(ip6, ifevent.plen.into(), Arc::new(Mutex::new(ifs)));
-                },
+                }
             };
         }
     });
-    
 
     // create a mapping from subdomain name to update server
     // TODO: periodically refresh
@@ -390,19 +394,23 @@ fn main() {
         // create a services cache per interface index, IPv4 & IPv6 should be merged
         let mut cache_map: HashMap<u32, HashMap<RecordKey, RecordInfo>> = HashMap::new();
 
-        poll.register(&rx, CHANNEL, Ready::readable(), PollOpt::level()).unwrap();
+        poll.register(&rx, CHANNEL, Ready::readable(), PollOpt::level())
+            .unwrap();
         loop {
             poll.poll(&mut events, None).expect("poll.poll failed");
             for event in events.iter() {
                 println!("channel recv");
                 // rx channel token
                 if event.token() == CHANNEL {
-                    let se: ServiceEvent = rx.try_recv().expect("try_recv() on event channel failed");
+                    let se: ServiceEvent =
+                        rx.try_recv().expect("try_recv() on event channel failed");
                     if !cache_map.contains_key(&se.ifindex) {
                         let table = HashMap::new();
                         cache_map.insert(se.ifindex, table);
                     }
-                    let cache = cache_map.get_mut(&se.ifindex).expect("cache_map get_mut() failed");
+                    let cache = cache_map
+                        .get_mut(&se.ifindex)
+                        .expect("cache_map get_mut() failed");
                     let key = RecordKey {
                         name: se.sname.clone(),
                         data: se.sdata.clone(),
@@ -422,7 +430,8 @@ fn main() {
                             println!("tok: {} when: {:?}", tok, when);
                             tok += 1;
                             timers.insert(timer_token, timer.set_timeout(when, key));
-                            poll.register(&timer, timer_token, Ready::readable(), PollOpt::edge()).unwrap();
+                            poll.register(&timer, timer_token, Ready::readable(), PollOpt::level())
+                                .unwrap();
 
                             entry.insert(val);
 
@@ -453,10 +462,16 @@ fn main() {
 
     let v4_listen_addr = SocketAddr::from(SocketAddrV4::new(IP_ALL.into(), MDNS_PORT));
     let v4_std_socket = multicast::join_multicast(&MDNS_IPV4, &v4_listen_addr, 0)
-                                .expect("mDNS IPv4 join_multicast");
+        .expect("mDNS IPv4 join_multicast");
     let v4_socket = UdpSocket::from_socket(v4_std_socket).expect("mio from_socket()");
     if options.nofour == false {
-        poll.register(&v4_socket, IPV4MC_ALLIF, Ready::readable(), PollOpt::level()).expect("poll.register failed");
+        poll.register(
+            &v4_socket,
+            IPV4MC_ALLIF,
+            Ready::readable(),
+            PollOpt::level(),
+        )
+        .expect("poll.register failed");
     }
 
     let mut events = Events::with_capacity(1024);
@@ -466,18 +481,25 @@ fn main() {
         for event in &events {
             match event.token() {
                 IPV4MC_ALLIF => {
-                    let (_length, from_addr) = v4_socket.recv_from(&mut buf).expect("recv_from failed");
+                    let (_length, from_addr) =
+                        v4_socket.recv_from(&mut buf).expect("recv_from failed");
                     match ifstate_for_v4_address(from_addr, &v4_ifs) {
                         Some(intf) => {
                             let ifs = intf.lock().unwrap();
-                            extract_mdns_response(ifs.ifindex, &ifs.subdomain, from_addr, &buf, &tx);
-                        },
+                            extract_mdns_response(
+                                ifs.ifindex,
+                                &ifs.subdomain,
+                                from_addr,
+                                &buf,
+                                &tx,
+                            );
+                        }
                         None => {
                             eprintln!("No interface for addr {:?}", from_addr);
                         }
                     };
                 }
-                _ => unreachable!()
+                _ => unreachable!(),
             }
         }
     }

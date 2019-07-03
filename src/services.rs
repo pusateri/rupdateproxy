@@ -1,10 +1,9 @@
-
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use bytes::Bytes;
 use domain_core::name::ParsedDname;
 use domain_core::opt::Opt;
-use domain_core::Dname;
 use domain_core::rdata::AllRecordData;
+use domain_core::Dname;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 #[derive(Debug, PartialEq)]
 pub enum ServiceAction {
